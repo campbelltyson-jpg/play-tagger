@@ -4,19 +4,6 @@ import altair as alt
 from datetime import datetime
 
 # =======================
-# EMBEDDED LOGO (PNG b64)
-# =======================
-import base64, io
-LOGO_B64 = (
-    "iVBORw0KGgoAAAANSUhEUgAAAWgAAADKCAYAAACIRtqEAABcvElEQVR42u39eZBl13XeiX5r7X2GO+WcWTMKKKBQQGEeSBAkSIIQ"
-"  # truncated in this view — paste the full string I provided you below
-)
-
-def logo_image_bytes():
-    return io.BytesIO(base64.b64decode(LOGO_B64))
-
-
-# =======================
 # Google Sheets (optional)
 # =======================
 USE_SHEETS = False
