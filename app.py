@@ -167,7 +167,7 @@ def _games_by_type(view: str):
 filtered_games = _games_by_type(type_chip)
 game = st.selectbox("Select Game", options=filtered_games, index=0)
 
-    new_game = st.text_input("Create new game")
+new_game = st.text_input("Create new game")
     colGA, colGB = st.columns(2)
     with colGA:
         game_type = st.selectbox("Type", ["Game","Scrimmage","Scout"], key="game_type_new")
