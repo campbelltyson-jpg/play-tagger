@@ -1,11 +1,30 @@
+# app.py — Play Tagger v4
 import streamlit as st
 import pandas as pd
 import altair as alt
 from datetime import datetime
 
-# =======================
-# Google Sheets (optional)
-# =======================
+# ============ EMBEDDED LOGO SUPPORT ============
+# You can set your logo Base64 in either place:
+# 1) Hard-code below in LOGO_B64, or
+# 2) Put it in Streamlit Secrets as secrets["LOGO_B64"]
+import base64, io
+
+# OPTION 1: paste your full base64 string between the triple quotes
+LOGO_B64 = """"""  # <- paste your base64 here (keep \n etc). Leave empty to use secrets or skip.
+
+def _get_logo_bytes_io():
+    # OPTION 2: try to get from secrets if not hard-coded
+    b64 = LOGO_B64.strip() or st.secrets.get("LOGO_B64", "").strip()
+    if not b64:
+        return None
+    try:
+        return io.BytesIO(base64.b64decode(b64))
+    except Exception:
+        return None
+
+
+# ============ Google Sheets (optional) ============
 USE_SHEETS = False
 gc = None
 sh = None
@@ -82,34 +101,43 @@ def sheets_overwrite_roster(players: list[str]):
     rows = [["Player"]] + [[p] for p in players]
     ws.update(f"A1:A{len(rows)}", rows)
 
-# ===== helper to filter games by type (must exist BEFORE using it)
+
+# ===== helper to filter games by type
 def _games_by_type(view: str, games, meta):
     if view == "All":
         return sorted(games)
     out = [g for g in games if meta.get(g, {}).get("type", "Game") == view]
     return sorted(out) if out else ["(none)"]
 
+
 # =======================
 # App config & state
 # =======================
-st.set_page_config(page_title="Play Tagger v3", layout="wide")
+st.set_page_config(page_title="Play Tagger v4", layout="wide")
 
 # load sheets (if available)
 playbook_df, games_df, roster_df = init_sheets()
 
 # session defaults
 ss = st.session_state
-ss.setdefault("plays_master", ["Chin","Horns Over","Floppy","Zipper","Spain PnR"])
+ss.setdefault("plays_master", [
+    # ——— Preloaded larger list (edit freely) ———
+    "Chin","Horns Over","Floppy","Zipper","Spain PnR","Horns Flare","Loop","Flex","Fist Out",
+    "Fist Up","Horns Twist","Diamond","Horns Cross","Pistol","Double Drag","Stagger","Ram",
+    "Horns Side","Horns Down","Horns Pop","Horns Dive","Elbow","1-4 High","Weave","Ghost",
+    "Stack","Box","Iverson","Scissor","Horns Rip","Chicago","Pindown","Wide","Wedge","Delay",
+    "Angle","Spread PnR","Horns 45","Spain Twist","Spain Rip","Zipper Flare","Horns Exit"
+])
 ss.setdefault("games", ["Scrimmage"])
 ss.setdefault("game_data", {})             # dict[game] -> list[dict]
 ss.setdefault("game_meta", {})             # dict[game] -> {"type": "...", "opponent": "..."}
-ss.setdefault("roster", ["#1","%Lead Guard","#5 Big"])  # editable
+ss.setdefault("roster", ["#1", "#3", "#5", "Lead Guard", "Wing", "Big"])  # editable
 
 # hydrate from sheets
 if not playbook_df.empty:
     merged = [p for p in playbook_df.get("Play Name", []).tolist() if p]
     if merged:
-        ss["plays_master"] = sorted(set(merged))
+        ss["plays_master"] = sorted(set(ss["plays_master"]) | set(merged))
 if not games_df.empty:
     for row in games_df.to_dict(orient="records"):
         name = row.get("Game Name")
@@ -130,23 +158,29 @@ if not roster_df.empty:
 # =======================
 c1, c2, c3 = st.columns([1,2,1])
 with c2:
-    # Safe logo call: only shows if you later define logo_image_bytes()
-    try:
-        st.image(logo_image_bytes(), caption=None, use_column_width=True)  # noqa: F821
-    except Exception:
-        pass
+    # Show logo if available
+    _logo_io = _get_logo_bytes_io()
+    if _logo_io:
+        st.image(_logo_io, use_column_width=True)
 
-# UI polish CSS (keep as one block if you want)
+# ===== iPad-friendly CSS (bigger tap targets, dark polish) =====
 st.markdown("""
 <style>
 /* Larger touch targets */
-.stSelectbox>div>div, .stTextInput>div>div>input, .stButton>button, .stRadio>div,
-.stTextInput>div>div>input { font-size: 1.05rem; }
-.stButton>button { padding: 0.6rem 0.9rem; border-radius: 10px; }
-/* Dark tidy borders */
+.stSelectbox > div > div,
+.stTextInput > div > div > input,
+.stButton > button,
+.stRadio > div {
+    font-size: 1.3rem !important;
+}
+.stButton > button {
+    padding: 0.8rem 1.2rem !important;
+    border-radius: 12px;
+}
+/* Tidy dark borders */
 [data-baseweb="select"] div { background: transparent; }
 .stDataFrame { border: 1px solid rgba(255,255,255,0.08); border-radius: 10px; }
-.stDownloadButton button { border-radius: 10px; }
+.stDownloadButton button { border-radius: 12px; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -228,7 +262,7 @@ meta.setdefault("opponent", meta.get("opponent", ""))
 # =======================
 # Tagging form
 # =======================
-st.title("🏀 Play Call Tagging (v3)")
+st.title("🏀 Play Call Tagging (v4)")
 
 with st.form("tag_form", clear_on_submit=True):
     cols = st.columns([1,1,1,1,1,1,1,1])
@@ -349,7 +383,7 @@ if not game_mode and not df.empty:
         ).properties(height=300, title="PPP by Quarter")
         st.altair_chart(chart3, use_container_width=True)
 
-        # PPP vs Opponent (last N seen)
+        # PPP vs Opponent
         if f["Opponent"].notna().any():
             ppp_opp = f.groupby("Opponent")["Points"].mean().reset_index().rename(columns={"Points":"PPP"})
             chart4 = alt.Chart(ppp_opp).mark_bar().encode(
