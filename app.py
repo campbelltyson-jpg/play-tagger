@@ -82,6 +82,12 @@ def sheets_overwrite_roster(players: list[str]):
     rows = [["Player"]] + [[p] for p in players]
     ws.update(f"A1:A{len(rows)}", rows)
 
+# ===== helper to filter games by type (must exist BEFORE using it)
+def _games_by_type(view: str, games, meta):
+    if view == "All":
+        return sorted(games)
+    out = [g for g in games if meta.get(g, {}).get("type", "Game") == view]
+    return sorted(out) if out else ["(none)"]
 
 # =======================
 # App config & state
@@ -124,20 +130,20 @@ if not roster_df.empty:
 # =======================
 c1, c2, c3 = st.columns([1,2,1])
 with c2:
-    st.image(logo_image_bytes(), caption=None, use_column_width=True)
-st.markdown(
-    """
-    <style>
-    .stSelectbox>div>div, .stTextInput>div>div>input, .stButton>button, .stRadio>div,
-    .stTextInput>div>div>input { font-size: 1.05rem; }
-    .stButton>button { padding: 0.6rem 0.9rem; border-radius: 10px; }
-    </style>
-    """, unsafe_allow_html=True
-)
+    # Safe logo call: only shows if you later define logo_image_bytes()
+    try:
+        st.image(logo_image_bytes(), caption=None, use_column_width=True)  # noqa: F821
+    except Exception:
+        pass
 
+# UI polish CSS (keep as one block if you want)
 st.markdown("""
 <style>
-/* tidy dark borders and hover */
+/* Larger touch targets */
+.stSelectbox>div>div, .stTextInput>div>div>input, .stButton>button, .stRadio>div,
+.stTextInput>div>div>input { font-size: 1.05rem; }
+.stButton>button { padding: 0.6rem 0.9rem; border-radius: 10px; }
+/* Dark tidy borders */
 [data-baseweb="select"] div { background: transparent; }
 .stDataFrame { border: 1px solid rgba(255,255,255,0.08); border-radius: 10px; }
 .stDownloadButton button { border-radius: 10px; }
@@ -158,16 +164,10 @@ with st.sidebar:
     st.header("Game Manager")
 
     # Build filtered game list for the dropdown based on chip
-def _games_by_type(view: str):
-    if view == "All":
-        return sorted(ss["games"])
-    out = [g for g in ss["games"] if ss["game_meta"].get(g, {}).get("type", "Game") == view]
-    return sorted(out) if out else ["(none)"]
+    filtered_games = _games_by_type(type_chip, ss["games"], ss["game_meta"])
+    game = st.selectbox("Select Game", options=filtered_games, index=0)
 
-filtered_games = _games_by_type(type_chip)
-game = st.selectbox("Select Game", options=filtered_games, index=0)
-
-new_game = st.text_input("Create new game")
+    new_game = st.text_input("Create new game")
     colGA, colGB = st.columns(2)
     with colGA:
         game_type = st.selectbox("Type", ["Game","Scrimmage","Scout"], key="game_type_new")
