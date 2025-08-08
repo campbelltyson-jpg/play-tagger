@@ -1,0 +1,6 @@
+[theme]
+base="dark"
+primaryColor="#e10600"         # Surge red vibe
+backgroundColor="#0f0f10"
+secondaryBackgroundColor="#17181a"
+textColor="#ffffff"
