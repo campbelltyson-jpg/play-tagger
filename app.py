@@ -9,7 +9,6 @@ from datetime import datetime
 import base64, io
 LOGO_B64 = (
     "iVBORw0KGgoAAAANSUhEUgAAAWgAAADKCAYAAACIRtqEAABcvElEQVR42u39eZBl13XeiX5r7X2GO+WcWTMKKKBQQGEeSBAkSIIQ"
-    "iVBORw0KGgoAAAANSUhEUgAAAWgAAADKCAYAAACIRtqEAABcvElEQVR42u39eZBl13XeiX5r7X2GO+WcWTMKKKBQQGEeSBAkSIIQ...
 "  # truncated in this view — paste the full string I provided you below
 )
 
