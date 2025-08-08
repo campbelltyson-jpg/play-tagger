@@ -122,11 +122,11 @@ playbook_df, games_df, roster_df = init_sheets()
 ss = st.session_state
 ss.setdefault("plays_master", [
     # ——— Preloaded larger list (edit freely) ———
-    "Chin","Horns Over","Floppy","Zipper","Spain PnR","Horns Flare","Loop","Flex","Fist Out",
-    "Fist Up","Horns Twist","Diamond","Horns Cross","Pistol","Double Drag","Stagger","Ram",
-    "Horns Side","Horns Down","Horns Pop","Horns Dive","Elbow","1-4 High","Weave","Ghost",
-    "Stack","Box","Iverson","Scissor","Horns Rip","Chicago","Pindown","Wide","Wedge","Delay",
-    "Angle","Spread PnR","Horns 45","Spain Twist","Spain Rip","Zipper Flare","Horns Exit"
+    "Chin","College","Open Sets","Away Gets","Spain PnR","Broken Play","Elbow","Flex-Rifle","Mustang",
+    "Slice","Gets","Chin-Quick Spain","Zoom","Pistol","77","Away","Knockoff",
+    "Roll","Horns Down","Horns Pop","Pitch","Elbow","ATO","Stack","Rub",
+    "Flow","Box","Iverson","Scissor","Horns Rip","Punch","Quick","Pistol","Flare-Quick","Delay",
+    "Step","Shake","Roll","Line 1","Transition","Zipper Quick","Random","Flat","1","High","College","X"
 ])
 ss.setdefault("games", ["Scrimmage"])
 ss.setdefault("game_data", {})             # dict[game] -> list[dict]
