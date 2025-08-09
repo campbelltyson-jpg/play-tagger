@@ -1,4 +1,4 @@
-# app.py — Play Tagger v5.3 (Game Manager up top)
+# app.py — Play Tagger v5.3.2
 import streamlit as st
 import pandas as pd
 from datetime import datetime
@@ -6,7 +6,7 @@ from datetime import datetime
 # =======================
 # CONFIG
 # =======================
-st.set_page_config(page_title="Play Tagger v5.3", layout="wide")
+st.set_page_config(page_title="Play Tagger v5.3.2", layout="wide")
 
 def logo_image_bytes():
     try:
@@ -92,7 +92,6 @@ def sheets_add_game(game_name: str, game_type: str, opponent: str):
     ws = sh.worksheet("Games")
     ws.append_row([game_name, game_type, opponent, datetime.now().isoformat(timespec="seconds")],
                   value_input_option="USER_ENTERED")
-    # also create the per-game worksheet
     get_or_create_game_ws(game_name)
 
 # =======================
@@ -123,9 +122,10 @@ ss.setdefault("plays_master", PLAY_NAMES.copy())
 ss.setdefault("games", ["Default Game"])
 ss.setdefault("game_meta", {})  # name -> {"quarter": "Q1", "opponent": "", "type": "Game"}
 ss.setdefault("current_game", "Default Game")
-ss.setdefault("game_data", {})  # name -> list of dict rows
+ss.setdefault("game_data", {})  # name -> list of rows
 ss.setdefault("roster", ["#1", "#2", "#3"])
 ss.setdefault("selected_plays", set())
+ss.setdefault("game_clock_prefill", "")
 
 # =======================
 # CSS
@@ -138,25 +138,22 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # =======================
-# INIT SHEETS + HYDRATE lists
+# INIT SHEETS + HYDRATE
 # =======================
 if init_sheets():
     try:
-        # Playbook
         playbook_df = pd.DataFrame(sh.worksheet("Playbook").get_all_records())
         if not playbook_df.empty and "Play Name" in playbook_df:
             ss["plays_master"] = sorted(set(ss["plays_master"]) | set(playbook_df["Play Name"].dropna().tolist()))
     except Exception:
         pass
     try:
-        # Roster
         roster_df = pd.DataFrame(sh.worksheet("Roster").get_all_records())
         if not roster_df.empty and "Player" in roster_df:
             ss["roster"] = [r for r in roster_df["Player"].dropna().tolist()]
     except Exception:
         pass
     try:
-        # Games list
         games_df = pd.DataFrame(sh.worksheet("Games").get_all_records())
         if not games_df.empty:
             for r in games_df.to_dict("records"):
@@ -171,7 +168,6 @@ if init_sheets():
     except Exception:
         pass
 
-# ensure containers for the current game
 ss["game_data"].setdefault(ss["current_game"], [])
 ss["game_meta"].setdefault(ss["current_game"], {"quarter": "Q1", "opponent": "", "type": "Game"})
 
@@ -184,32 +180,32 @@ with c2:
     if _logo:
         st.image(_logo, use_container_width=True)
 
-st.title("🏀 Play Call Tagging v5.3")
+st.title("🏀 Play Call Tagging v5.3.2")
 
 # =======================
 # GAME MANAGER (TOP BAR)
 # =======================
 gm1, gm2, gm3, gm4 = st.columns([2,2,2,2])
 with gm1:
-    # Select active game
-    current_game = st.selectbox("Current Game", options=ss["games"], index=ss["games"].index(ss["current_game"]) if ss["current_game"] in ss["games"] else 0)
+    current_game = st.selectbox("Current Game", options=ss["games"],
+                                index=ss["games"].index(ss["current_game"]) if ss["current_game"] in ss["games"] else 0)
     if current_game != ss["current_game"]:
         ss["current_game"] = current_game
         ss["game_data"].setdefault(ss["current_game"], [])
         ss["game_meta"].setdefault(ss["current_game"], {"quarter": "Q1", "opponent": "", "type": "Game"})
 
 with gm2:
-    # Per-game quarter
     meta = ss["game_meta"].setdefault(ss["current_game"], {"quarter": "Q1", "opponent": "", "type": "Game"})
-    meta["quarter"] = st.selectbox("Quarter (preset)", ["Q1","Q2","Q3","Q4","OT"], index=["Q1","Q2","Q3","Q4","OT"].index(meta.get("quarter","Q1")))
+    meta["quarter"] = st.selectbox("Quarter (preset)", ["Q1","Q2","Q3","Q4","OT"],
+                                   index=["Q1","Q2","Q3","Q4","OT"].index(meta.get("quarter","Q1")))
 
 with gm3:
     meta["opponent"] = st.text_input("Opponent (saved per game)", value=meta.get("opponent",""))
 
 with gm4:
-    meta["type"] = st.selectbox("Game Type", ["Game","Scrimmage","Scout"], index=["Game","Scrimmage","Scout"].index(meta.get("type","Game")))
+    meta["type"] = st.selectbox("Game Type", ["Game","Scrimmage","Scout"],
+                                index=["Game","Scrimmage","Scout"].index(meta.get("type","Game")))
 
-# New game creator (inline)
 with st.expander("➕ Create New Game"):
     ng1, ng2, ng3, ng4 = st.columns([2,2,2,2])
     with ng1:
@@ -229,6 +225,7 @@ with st.expander("➕ Create New Game"):
                     sheets_add_game(new_name, new_type, new_opp)
                 st.success(f"Created game: {new_name}")
                 ss["current_game"] = new_name
+                st.rerun()
             else:
                 st.warning("Enter a game name first.")
 
@@ -246,6 +243,7 @@ with st.sidebar:
                 if USE_SHEETS:
                     sh.worksheet("Playbook").append_row(["", np, ""], value_input_option="USER_ENTERED")
             st.success(f"Added play: {np}")
+            st.rerun()
         else:
             st.warning("Enter a play name.")
 
@@ -266,18 +264,15 @@ with st.sidebar:
 # =======================
 gc_cols = st.columns([3,1,1])
 with gc_cols[0]:
-    game_clock = st.text_input("1) Game clock (mm:ss)", value="", placeholder="e.g., 6:37")
+    game_clock = st.text_input("1) Game clock (mm:ss)", value=ss.get("game_clock_prefill",""), placeholder="e.g., 6:37")
 with gc_cols[1]:
     if st.button("Set to Now"):
-        st.session_state["game_clock_prefill"] = datetime.now().strftime("%M:%S")
-        st.experimental_rerun()
+        ss["game_clock_prefill"] = datetime.now().strftime("%M:%S")
+        st.rerun()
 with gc_cols[2]:
     if st.button("Clear"):
-        st.session_state["game_clock_prefill"] = ""
-        st.experimental_rerun()
-if "game_clock_prefill" in st.session_state and st.session_state["game_clock_prefill"]:
-    game_clock = st.session_state["game_clock_prefill"]
-    st.session_state["game_clock_prefill"] = ""
+        ss["game_clock_prefill"] = ""
+        st.rerun()
 
 # =======================
 # 2) PLAY NAMES — multi-select checkbox grid (4 cols)
@@ -302,16 +297,29 @@ caller = st.radio("4) Who called it?", CALLERS, horizontal=True, index=0)
 outcome = st.radio("5) Outcome", OUTCOMES, horizontal=False, index=0)
 second_chance = st.radio("6) 2nd Chance?", ["No","Yes"], horizontal=True, index=0)
 
-# Use per-game meta for quarter/opponent/type
 meta = ss["game_meta"][ss["current_game"]]
 quarter = meta.get("quarter", "Q1")
 opponent = meta.get("opponent", "")
 game_type = meta.get("type", "Game")
 
 # =======================
-# CONFIRM ENTRY
+# CONFIRM / DUPLICATE ENTRY
 # =======================
-if st.button("✅ Add Entry", use_container_width=True):
+bcol1, bcol2 = st.columns([3,2])
+with bcol1:
+    add_clicked = st.button("✅ Add Entry", use_container_width=True)
+with bcol2:
+    dup_clicked = st.button("🔁 Duplicate Last", use_container_width=True)
+
+def _push_to_sheets_row(r):
+    if USE_SHEETS:
+        sheets_append_play(ss["current_game"], [
+            r["Timestamp"], r["Play Name"], r["Call Type"], r["Caller"],
+            r["Outcome"], r["Points"], r["2nd Chance?"], r["Quarter"],
+            r["Opponent"], r["Game Type"]
+        ])
+
+if add_clicked:
     if not game_clock.strip():
         st.warning("Enter the game clock (mm:ss) before adding.")
     elif not ss["selected_plays"]:
@@ -319,34 +327,40 @@ if st.button("✅ Add Entry", use_container_width=True):
     else:
         rows = []
         for play in sorted(ss["selected_plays"], key=str.lower):
-            row = {
+            rows.append({
                 "Timestamp": game_clock.strip(),
                 "Play Name": play,
                 "Call Type": call_type,
                 "Caller": caller,
                 "Outcome": outcome,
-                "Points": 2 if outcome=="Made 2" else 3 if outcome=="Made 3" else 1 if outcome=="Foul (Made 1/2)" else 2 if outcome=="Foul (Made 2/2)" else 0,
+                "Points": points_from_outcome(outcome),
                 "2nd Chance?": second_chance,
                 "Quarter": quarter,
                 "Opponent": opponent,
                 "Game Type": game_type
-            }
-            rows.append(row)
+            })
         ss["game_data"].setdefault(ss["current_game"], []).extend(rows)
-
-        if USE_SHEETS:
-            for r in rows:
-                sheets_append_play(ss["current_game"], [
-                    r["Timestamp"], r["Play Name"], r["Call Type"], r["Caller"],
-                    r["Outcome"], r["Points"], r["2nd Chance?"], r["Quarter"],
-                    r["Opponent"], r["Game Type"]
-                ])
+        for r in rows:
+            _push_to_sheets_row(r)
         st.success(f"Added {len(rows)} entr{'y' if len(rows)==1 else 'ies'}.")
 
-        # Reset for next possession: clear clock + selections (keep radios sticky)
-        for name in list(ss["selected_plays"]):
-            st.session_state[f"play_chk_{name}"] = False
+        # Reset properly for next possession
         ss["selected_plays"].clear()
+        ss["game_clock_prefill"] = ""
+        st.rerun()
+
+if dup_clicked:
+    rows_list = ss["game_data"].get(ss["current_game"], [])
+    if not rows_list:
+        st.warning("No previous entry to duplicate.")
+    else:
+        last = rows_list[-1].copy()
+        # If a game clock is provided, use it; else keep last timestamp
+        ts_val = game_clock.strip() if game_clock.strip() else last.get("Timestamp", "")
+        last["Timestamp"] = ts_val
+        ss["game_data"][ss["current_game"]].append(last)
+        _push_to_sheets_row(last)
+        st.success("Duplicated last entry.")
 
 # =======================
 # TABLE + EDIT/DELETE
@@ -395,4 +409,10 @@ else:
 
     with cexport:
         csv = df.to_csv(index=False).encode()
-        st.download_button("⬇️ Download CSV", data=csv, file_name=f"{ss['current_game'].replace(' ','_')}.csv", mime="text/csv", use_container_width=True)
+        st.download_button(
+            "⬇️ Download CSV",
+            data=csv,
+            file_name=f"{ss['current_game'].replace(' ','_')}.csv",
+            mime="text/csv",
+            use_container_width=True
+        )
