@@ -199,8 +199,8 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 .stButton > button {
-    padding: 0.8rem 1.0rem !important;
-    border-radius: 999px;           /* pill look */
+padding: 0.8rem 1.0rem !important;
+border-radius: 999px;           /* pill look */
 }
 
 # ===== Game-type chips =====
