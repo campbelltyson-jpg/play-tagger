@@ -1,54 +1,45 @@
+# app.py — Play Tagger v5.1.2
 import streamlit as st
 import pandas as pd
-import altair as alt
 from datetime import datetime
-import base64
 
 # =======================
 # CONFIG
 # =======================
-st.set_page_config(page_title="Play Tagger v5.1.1", layout="wide")
+st.set_page_config(page_title="Play Tagger v5.1.2", layout="wide")
 
-# Embedded logo loader
+# Embedded logo loader (file in repo root)
 def logo_image_bytes():
-    with open("Transition Defense.png", "rb") as f:
-        return f.read()
+    try:
+        with open("Transition Defense.png", "rb") as f:
+            return f.read()
+    except Exception:
+        return None
 
 # =======================
-# CHIP HELPER
+# CHIP HELPER (pill buttons)
 # =======================
-def chip_group(label, options, key, cols=4, multi=False):
+def chip_group(label, options, key, cols=4):
+    """Render pill buttons as a single-choice chip group. Stores selection in st.session_state[key]."""
     st.markdown(f"**{label}**")
-    if multi:
-        st.session_state.setdefault(key, set())
-    else:
-        st.session_state.setdefault(key, options[0])
+    st.session_state.setdefault(key, options[0])
     c = st.columns(cols)
     for i, opt in enumerate(options):
-        active = opt in st.session_state[key] if multi else (st.session_state[key] == opt)
-        style = (
-            "background-color:#e10600;color:white;border:none;border-radius:999px;padding:0.6rem 0.8rem;font-weight:bold;"
-            if active else
-            "background-color:#333;color:white;border-radius:999px;padding:0.6rem 0.8rem;opacity:0.85;"
-        )
+        active = (st.session_state[key] == opt)
+        # style purely visual; Streamlit ignores inline CSS on buttons, but we still group visually via layout
         if c[i % cols].button(opt, key=f"{key}_{opt}"):
-            if multi:
-                if opt in st.session_state[key]:
-                    st.session_state[key].remove(opt)
-                else:
-                    st.session_state[key].add(opt)
-            else:
-                st.session_state[key] = opt
-    return list(st.session_state[key]) if multi else st.session_state[key]
+            st.session_state[key] = opt
+    return st.session_state[key]
 
 # =======================
-# GOOGLE SHEETS
+# GOOGLE SHEETS (optional)
 # =======================
 USE_SHEETS = False
 gc = None
 sh = None
 
 def init_sheets():
+    """Initialize Sheets using secrets. Creates core tabs if missing."""
     global USE_SHEETS, gc, sh
     try:
         import gspread
@@ -56,13 +47,14 @@ def init_sheets():
         secrets = st.secrets
         creds_info = secrets["gcp_service_account"]
         sheet_id = secrets["SHEET_ID"]
+
         scopes = ["https://www.googleapis.com/auth/spreadsheets"]
         creds = Credentials.from_service_account_info(creds_info, scopes=scopes)
         gc = gspread.authorize(creds)
         sh = gc.open_by_key(sheet_id)
         USE_SHEETS = True
 
-        # Ensure core tabs exist
+        # Ensure baseline tabs exist
         ws_names = [ws.title for ws in sh.worksheets()]
         if "Playbook" not in ws_names:
             sh.add_worksheet("Playbook", rows=1000, cols=3)
@@ -73,9 +65,10 @@ def init_sheets():
         if "Roster" not in ws_names:
             sh.add_worksheet("Roster", rows=200, cols=1)
             sh.worksheet("Roster").update("A1:A1", [["Player"]])
+
         return True
     except Exception:
-        st.info("Running without Google Sheets sync.")
+        st.info("Running without Google Sheets sync. Add Streamlit secrets to enable cloud sync.")
         return False
 
 def get_or_create_game_ws(game_name: str):
@@ -92,11 +85,6 @@ def get_or_create_game_ws(game_name: str):
 def sheets_append_play(game_name: str, row: list):
     ws = get_or_create_game_ws(game_name)
     ws.append_row(row, value_input_option="USER_ENTERED")
-
-def sheets_add_game(game_name: str, game_type: str, opponent: str):
-    ws = sh.worksheet("Games")
-    ws.append_row([game_name, game_type, opponent, datetime.now().isoformat(timespec="seconds")],
-                  value_input_option="USER_ENTERED")
 
 def sheets_add_playbook(play_name: str, code: str = "", system: str = ""):
     ws = sh.worksheet("Playbook")
@@ -125,43 +113,53 @@ OUTCOMES = [
     "Turnover","Dead Ball"
 ]
 
+def points_from_outcome(o: str) -> int:
+    return 2 if o=="Made 2" else 3 if o=="Made 3" else 1 if o=="Foul (Made 1/2)" else 2 if o=="Foul (Made 2/2)" else 0
+
 # =======================
 # STATE
 # =======================
 ss = st.session_state
-ss.setdefault("plays_master", PLAY_NAMES)
-ss.setdefault("game_data", {})
+ss.setdefault("plays_master", PLAY_NAMES.copy())
+ss.setdefault("game_data", {})          # dict[game] -> list of entries
 ss.setdefault("current_game", "Default Game")
 ss.setdefault("quarter", "Q1")
 ss.setdefault("opponent", "")
 ss.setdefault("roster", ["#1", "#2", "#3"])
 
 # =======================
-# CSS
+# CSS (pill look + larger tap targets)
 # =======================
 st.markdown("""
 <style>
 .stButton > button {
     border-radius: 999px !important;
-    font-size: 1rem !important;
+    font-size: 1.05rem !important;
+    padding: 0.8rem 1.1rem !important;
 }
+.stDataFrame { border-radius: 10px; }
 </style>
 """, unsafe_allow_html=True)
 
 # =======================
-# INIT SHEETS + LOAD DATA
+# INIT SHEETS + HYDRATE
 # =======================
 if init_sheets():
-    import gspread
-    playbook_df = pd.DataFrame(sh.worksheet("Playbook").get_all_records())
-    if not playbook_df.empty:
-        ss["plays_master"] = sorted(set(playbook_df["Play Name"].dropna().tolist()))
-    roster_df = pd.DataFrame(sh.worksheet("Roster").get_all_records())
-    if not roster_df.empty:
-        ss["roster"] = [r for r in roster_df["Player"].dropna().tolist()]
+    try:
+        playbook_df = pd.DataFrame(sh.worksheet("Playbook").get_all_records())
+        if not playbook_df.empty and "Play Name" in playbook_df:
+            ss["plays_master"] = sorted(set(ss["plays_master"]) | set(playbook_df["Play Name"].dropna().tolist()))
+    except Exception:
+        pass
+    try:
+        roster_df = pd.DataFrame(sh.worksheet("Roster").get_all_records())
+        if not roster_df.empty and "Player" in roster_df:
+            ss["roster"] = [r for r in roster_df["Player"].dropna().tolist()]
+    except Exception:
+        pass
 
 # =======================
-# SIDEBAR - Add Plays / Roster
+# SIDEBAR — Playbook / Roster
 # =======================
 with st.sidebar:
     st.header("Manage Playbook")
@@ -190,59 +188,75 @@ with st.sidebar:
 # =======================
 # HEADER
 # =======================
-col1, col2, col3 = st.columns([1,2,1])
-with col2:
-    st.image(logo_image_bytes(), use_column_width=True)
+c1, c2, c3 = st.columns([1,2,1])
+with c2:
+    _logo = logo_image_bytes()
+    if _logo:
+        st.image(_logo, use_container_width=True)
 
-st.title("🏀 Play Call Tagging v5.1.1")
+st.title("🏀 Play Call Tagging v5.1.2")
 
 # =======================
-# FORM
+# CHIP SECTIONS (OUTSIDE FORM)
+# =======================
+chip_play_name = chip_group("1) Play Name", ss["plays_master"], key="chip_play_name", cols=4)
+chip_call_type = chip_group("2) Call Type", CALL_TYPES, key="chip_call_type", cols=4)
+chip_caller    = chip_group("3) Caller",     CALLERS,    key="chip_caller",    cols=2)
+chip_outcome   = chip_group("4) Outcome",    OUTCOMES,   key="chip_outcome",   cols=4)
+chip_second    = chip_group("5) 2nd Chance?",["No","Yes"], key="chip_second", cols=2)
+
+# =======================
+# FORM (timestamp + confirm only)
 # =======================
 with st.form("tag_form", clear_on_submit=True):
-    ts_now = st.checkbox("Use current time", value=True)
-    timestamp = datetime.now().strftime("%H:%M:%S") if ts_now else st.text_input("Timestamp", "")
+    use_now = st.checkbox("Use current time", value=True, key="use_now_ts")
+    timestamp = datetime.now().strftime("%H:%M:%S") if use_now else st.text_input("Timestamp", key="manual_ts")
 
-    play_name = chip_group("1) Play Name", ss["plays_master"], key="chip_play_name", cols=4)
-    call_type = chip_group("2) Call Type", CALL_TYPES, key="chip_call_type", cols=4)
-    caller = chip_group("3) Caller", CALLERS, key="chip_caller", cols=2)
-    outcome = chip_group("4) Outcome", OUTCOMES, key="chip_outcome", cols=4)
-    second_chance = chip_group("5) 2nd Chance?", ["No","Yes"], key="chip_second", cols=2)
-
-    quarter = st.selectbox("Quarter", ["Q1","Q2","Q3","Q4","OT"], index=["Q1","Q2","Q3","Q4","OT"].index(ss["quarter"]))
-    opponent = st.text_input("Opponent", value=ss["opponent"])
+    quarter = st.selectbox("Quarter", ["Q1","Q2","Q3","Q4","OT"],
+                           index=["Q1","Q2","Q3","Q4","OT"].index(ss.get("quarter","Q1")))
+    opponent = st.text_input("Opponent", value=ss.get("opponent",""))
 
     submitted = st.form_submit_button("✅ Add Entry", use_container_width=True)
-    if submitted:
-        ss["quarter"] = quarter
-        ss["opponent"] = opponent
-        entry = {
-            "Timestamp": timestamp,
-            "Play Name": play_name,
-            "Call Type": call_type,
-            "Caller": caller,
-            "Outcome": outcome,
-            "Points": 2 if outcome=="Made 2" else 3 if outcome=="Made 3" else 1 if outcome=="Foul (Made 1/2)" else 2 if outcome=="Foul (Made 2/2)" else 0,
-            "2nd Chance?": second_chance,
-            "Quarter": quarter,
-            "Opponent": opponent,
-            "Game Type": "Game"
-        }
-        ss["game_data"].setdefault(ss["current_game"], []).append(entry)
-        if USE_SHEETS:
-            sheets_append_play(ss["current_game"], [
-                entry["Timestamp"], entry["Play Name"], entry["Call Type"], entry["Caller"],
-                entry["Outcome"], entry["Points"], entry["2nd Chance?"], entry["Quarter"],
-                entry["Opponent"], entry["Game Type"]
-            ])
-        st.success("Play logged.")
+
+if submitted:
+    ss["quarter"] = quarter
+    ss["opponent"] = opponent
+
+    play_name     = st.session_state["chip_play_name"]
+    call_type     = st.session_state["chip_call_type"]
+    caller        = st.session_state["chip_caller"]
+    outcome       = st.session_state["chip_outcome"]
+    second_chance = st.session_state["chip_second"]
+
+    entry = {
+        "Timestamp": timestamp,
+        "Play Name": play_name,
+        "Call Type": call_type,
+        "Caller": caller,
+        "Outcome": outcome,
+        "Points": points_from_outcome(outcome),
+        "2nd Chance?": second_chance,
+        "Quarter": quarter,
+        "Opponent": opponent,
+        "Game Type": "Game"
+    }
+    ss["game_data"].setdefault(ss["current_game"], []).append(entry)
+
+    if USE_SHEETS:
+        sheets_append_play(ss["current_game"], [
+            entry["Timestamp"], entry["Play Name"], entry["Call Type"], entry["Caller"],
+            entry["Outcome"], entry["Points"], entry["2nd Chance?"], entry["Quarter"],
+            entry["Opponent"], entry["Game Type"]
+        ])
+
+    st.success("Play logged.")
 
 # =======================
-# DATA TABLE
+# TABLE + EXPORT
 # =======================
 df = pd.DataFrame(ss["game_data"].get(ss["current_game"], []))
 if not df.empty:
     st.subheader(f"Logged Plays — {ss['current_game']}")
-    st.dataframe(df, use_container_width=True)
+    st.dataframe(df, use_container_width=True, height=320)
     csv = df.to_csv(index=False).encode()
     st.download_button("⬇️ Download CSV", data=csv, file_name="plays.csv", mime="text/csv")
