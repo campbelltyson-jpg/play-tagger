@@ -1,4 +1,4 @@
-# app.py — Play Tagger v5.3.2
+# app.py — Play Tagger v6
 import streamlit as st
 import pandas as pd
 from datetime import datetime
@@ -6,7 +6,7 @@ from datetime import datetime
 # =======================
 # CONFIG
 # =======================
-st.set_page_config(page_title="Play Tagger v5.3.2", layout="wide")
+st.set_page_config(page_title="Play Tagger v6", layout="wide")
 
 def logo_image_bytes():
     try:
@@ -57,36 +57,41 @@ def init_sheets():
 def game_ws_title(game_name: str) -> str:
     return f"Game - {game_name}"
 
+GAME_HEADERS = [
+    "Timestamp","Play Name","Call Type","Caller","Outcome","Points",
+    "2nd Chance?","2nd Chance Outcome","Quarter","Opponent","Game Type"
+]
+
 def get_or_create_game_ws(game_name: str):
     ws_title = game_ws_title(game_name)
     ws_names = [ws.title for ws in sh.worksheets()]
     if ws_title not in ws_names:
-        ws = sh.add_worksheet(ws_title, rows=5000, cols=30)
-        ws.update("A1:K1", [[
-            "Timestamp","Play Name","Call Type","Caller","Outcome","Points","2nd Chance?",
-            "Quarter","Opponent","Game Type"
-        ]])
-    return sh.worksheet(ws_title)
+        ws = sh.add_worksheet(ws_title, rows=6000, cols=len(GAME_HEADERS))
+        ws.update(f"A1:{chr(64+len(GAME_HEADERS))}1", [GAME_HEADERS])
+    else:
+        ws = sh.worksheet(ws_title)
+        # If an older sheet exists without the new column, rewrite header to include it
+        header = ws.row_values(1)
+        if header != GAME_HEADERS:
+            ws.update(f"A1:{chr(64+len(GAME_HEADERS))}1", [GAME_HEADERS])
+    return ws
 
 def sheets_append_play(game_name: str, row: list):
     ws = get_or_create_game_ws(game_name)
     ws.append_row(row, value_input_option="USER_ENTERED")
 
 def sheets_overwrite_game(game_name: str, df: pd.DataFrame):
-    """Overwrite the entire game worksheet with current df (keeps header)."""
     ws = get_or_create_game_ws(game_name)
-    ws.resize(rows=1)
-    ws.update("A1:K1", [[
-        "Timestamp","Play Name","Call Type","Caller","Outcome","Points","2nd Chance?",
-        "Quarter","Opponent","Game Type"
-    ]])
+    ws.resize(rows=1)  # keep header
     if df.empty:
+        ws.update(f"A1:{chr(64+len(GAME_HEADERS))}1", [GAME_HEADERS])
         return
-    values = df[[
-        "Timestamp","Play Name","Call Type","Caller","Outcome","Points","2nd Chance?",
-        "Quarter","Opponent","Game Type"
-    ]].fillna("").values.tolist()
-    ws.update(f"A2:K{len(values)+1}", values)
+    # Ensure all columns exist / order
+    for col in GAME_HEADERS:
+        if col not in df.columns:
+            df[col] = ""
+    df = df[GAME_HEADERS]
+    ws.update(f"A1:{chr(64+len(GAME_HEADERS))}{len(df)+1}", [GAME_HEADERS] + df.fillna("").values.tolist())
 
 def sheets_add_game(game_name: str, game_type: str, opponent: str):
     ws = sh.worksheet("Games")
@@ -105,11 +110,13 @@ PLAY_NAMES = [
 ]
 CALL_TYPES = ["Early Offense","Half Court","BLOB","SLOB","Zone"]
 CALLERS = ["Coach","Player"]
+# Base outcomes
 OUTCOMES = [
     "Made 2","Missed 2","Made 3","Missed 3",
     "Foul (Made 1/2)","Foul (Made 2/2)","Foul (Missed Both)",
-    "Turnover","Dead Ball"
+    "Turnover","Dead Ball","Timeout","Dead Ball Foul"
 ]
+SECOND_CHANCE_OUTCOMES = ["Made 2","Missed 2","Made 3","Missed 3","Foul","Turnover","Reset/Other"]
 
 def points_from_outcome(o: str) -> int:
     return 2 if o=="Made 2" else 3 if o=="Made 3" else 1 if o=="Foul (Made 1/2)" else 2 if o=="Foul (Made 2/2)" else 0
@@ -125,7 +132,9 @@ ss.setdefault("current_game", "Default Game")
 ss.setdefault("game_data", {})  # name -> list of rows
 ss.setdefault("roster", ["#1", "#2", "#3"])
 ss.setdefault("selected_plays", set())
-ss.setdefault("game_clock_prefill", "")
+ss.setdefault("game_clock_min", 12)
+ss.setdefault("game_clock_sec", 0)
+ss.setdefault("pending_action", None)  # for Quick Bar confirm
 
 # =======================
 # CSS
@@ -134,6 +143,7 @@ st.markdown("""
 <style>
 .stButton > button { border-radius: 999px; padding: 0.8rem 1.1rem; font-size: 1.05rem; }
 .stDataFrame { border-radius: 10px; }
+.quickbar button { margin-bottom: 6px; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -180,7 +190,7 @@ with c2:
     if _logo:
         st.image(_logo, use_container_width=True)
 
-st.title("🏀 Play Call Tagging v5.3.2")
+st.title("🏀 Play Call Tagging v6")
 
 # =======================
 # GAME MANAGER (TOP BAR)
@@ -260,19 +270,17 @@ with st.sidebar:
         st.success("Roster saved.")
 
 # =======================
-# 1) GAME CLOCK (manual)
+# 1) GAME CLOCK — scroll dial feel (pickers)
 # =======================
-gc_cols = st.columns([3,1,1])
-with gc_cols[0]:
-    game_clock = st.text_input("1) Game clock (mm:ss)", value=ss.get("game_clock_prefill",""), placeholder="e.g., 6:37")
-with gc_cols[1]:
-    if st.button("Set to Now"):
-        ss["game_clock_prefill"] = datetime.now().strftime("%M:%S")
-        st.rerun()
-with gc_cols[2]:
-    if st.button("Clear"):
-        ss["game_clock_prefill"] = ""
-        st.rerun()
+st.markdown("**1) Game clock**")
+cmin, csep, csec = st.columns([1,0.3,1])
+with cmin:
+    ss["game_clock_min"] = st.selectbox("Min", list(range(12, -1, -1)), index=0, label_visibility="collapsed")
+with csep:
+    st.markdown("<div style='text-align:center;font-size:1.6rem;padding-top:0.6rem'>:</div>", unsafe_allow_html=True)
+with csec:
+    ss["game_clock_sec"] = st.selectbox("Sec", [f"{s:02d}" for s in range(59, -1, -1)], index=0, label_visibility="collapsed")
+game_clock = f"{ss['game_clock_min']}:{ss['game_clock_sec']}"
 
 # =======================
 # 2) PLAY NAMES — multi-select checkbox grid (4 cols)
@@ -290,87 +298,131 @@ for i, name in enumerate(sorted(ss["plays_master"], key=str.lower)):
 ss["selected_plays"] = selected
 
 # =======================
-# 3–6) Call Type / Caller / Outcome / 2nd Chance
+# 3–6) Call Type / Caller / 2nd Chance / Outcomes
 # =======================
 call_type = st.radio("3) Call Type", CALL_TYPES, horizontal=False, index=0)
 caller = st.radio("4) Who called it?", CALLERS, horizontal=True, index=0)
-outcome = st.radio("5) Outcome", OUTCOMES, horizontal=False, index=0)
-second_chance = st.radio("6) 2nd Chance?", ["No","Yes"], horizontal=True, index=0)
+
+second_chance = st.radio("5) 2nd Chance?", ["No","Yes"], horizontal=True, index=0)
+sc_outcome = None
+if second_chance == "Yes":
+    sc_outcome = st.radio("Second‑Chance Outcome", SECOND_CHANCE_OUTCOMES, horizontal=False, index=0)
+
+# Standard (non‑quick bar) outcome selector (still available)
+outcome = st.radio("6) Outcome", OUTCOMES, horizontal=False, index=0)
 
 meta = ss["game_meta"][ss["current_game"]]
 quarter = meta.get("quarter", "Q1")
 opponent = meta.get("opponent", "")
 game_type = meta.get("type", "Game")
 
-# =======================
-# CONFIRM / DUPLICATE ENTRY
-# =======================
-bcol1, bcol2 = st.columns([3,2])
-with bcol1:
-    add_clicked = st.button("✅ Add Entry", use_container_width=True)
-with bcol2:
-    dup_clicked = st.button("🔁 Duplicate Last", use_container_width=True)
+def _row_dict(play, ts, outc, sc_flag, sc_detail):
+    return {
+        "Timestamp": ts,
+        "Play Name": play,
+        "Call Type": call_type,
+        "Caller": caller,
+        "Outcome": outc,
+        "Points": (2 if outc=="Made 2" else 3 if outc=="Made 3" else 1 if outc=="Foul (Made 1/2)" else 2 if outc=="Foul (Made 2/2)" else 0),
+        "2nd Chance?": sc_flag,
+        "2nd Chance Outcome": (sc_detail or ""),
+        "Quarter": quarter,
+        "Opponent": opponent,
+        "Game Type": game_type
+    }
 
 def _push_to_sheets_row(r):
     if USE_SHEETS:
         sheets_append_play(ss["current_game"], [
             r["Timestamp"], r["Play Name"], r["Call Type"], r["Caller"],
-            r["Outcome"], r["Points"], r["2nd Chance?"], r["Quarter"],
-            r["Opponent"], r["Game Type"]
+            r["Outcome"], r["Points"], r["2nd Chance?"], r["2nd Chance Outcome"],
+            r["Quarter"], r["Opponent"], r["Game Type"]
         ])
 
-if add_clicked:
-    if not game_clock.strip():
-        st.warning("Enter the game clock (mm:ss) before adding.")
-    elif not ss["selected_plays"]:
+# =======================
+# QUICK BAR (with Confirm)
+# =======================
+st.markdown("**Quick Bar**")
+q1, q2, q3, q4, q5, q6 = st.columns(6)
+quick_map = {
+    "Made 2": "Made 2", "Miss 2": "Missed 2",
+    "Made 3": "Made 3", "Miss 3": "Missed 3",
+    "Foul 1/2": "Foul (Made 1/2)", "Foul 2/2": "Foul (Made 2/2)", "Foul 0/2": "Foul (Missed Both)",
+    "TO": "Turnover", "Dead Ball": "Dead Ball", "Timeout": "Timeout", "DB Foul": "Dead Ball Foul"
+}
+# Lay out buttons
+if q1.button("Made 2"): ss["pending_action"] = "Made 2"
+if q1.button("Miss 2"): ss["pending_action"] = "Missed 2"
+if q2.button("Made 3"): ss["pending_action"] = "Made 3"
+if q2.button("Miss 3"): ss["pending_action"] = "Missed 3"
+if q3.button("Foul 1/2"): ss["pending_action"] = "Foul (Made 1/2)"
+if q3.button("Foul 2/2"): ss["pending_action"] = "Foul (Made 2/2)"
+if q3.button("Foul 0/2"): ss["pending_action"] = "Foul (Missed Both)"
+if q4.button("TO"): ss["pending_action"] = "Turnover"
+if q5.button("Dead Ball"): ss["pending_action"] = "Dead Ball"
+if q5.button("Timeout"): ss["pending_action"] = "Timeout"
+if q6.button("DB Foul"): ss["pending_action"] = "Dead Ball Foul"
+
+# Confirm banner
+if ss.get("pending_action"):
+    with st.container(border=True):
+        st.write(f"Pending: **{ss['pending_action']}** | Plays: **{', '.join(sorted(ss['selected_plays'])) or '(none)'}** | Clock: **{game_clock}** | Q: **{quarter}**")
+        if second_chance == "Yes":
+            st.write(f"2nd‑Chance Outcome: **{sc_outcome or '(select)'}**")
+        c1, c2 = st.columns([1,1])
+        with c1:
+            if st.button("Confirm"):
+                if not ss["selected_plays"]:
+                    st.warning("Select at least one play.")
+                else:
+                    rows = []
+                    for play in sorted(ss["selected_plays"], key=str.lower):
+                        r = _row_dict(play, game_clock, ss["pending_action"], second_chance, sc_outcome)
+                        rows.append(r)
+                    ss["game_data"].setdefault(ss["current_game"], []).extend(rows)
+                    for r in rows: _push_to_sheets_row(r)
+                    st.success(f"Logged {len(rows)} entr{'y' if len(rows)==1 else 'ies'} via Quick Bar.")
+                    # reset only selection; keep clock and radios sticky
+                    ss["selected_plays"].clear()
+                    ss["pending_action"] = None
+                    st.rerun()
+        with c2:
+            if st.button("Cancel"):
+                ss["pending_action"] = None
+                st.info("Quick action canceled.")
+
+# =======================
+# STANDARD ADD ENTRY (non‑quick)
+# =======================
+if st.button("✅ Add Entry", use_container_width=True):
+    if not ss["selected_plays"]:
         st.warning("Select at least one play.")
     else:
         rows = []
         for play in sorted(ss["selected_plays"], key=str.lower):
-            rows.append({
-                "Timestamp": game_clock.strip(),
-                "Play Name": play,
-                "Call Type": call_type,
-                "Caller": caller,
-                "Outcome": outcome,
-                "Points": points_from_outcome(outcome),
-                "2nd Chance?": second_chance,
-                "Quarter": quarter,
-                "Opponent": opponent,
-                "Game Type": game_type
-            })
+            r = _row_dict(play, game_clock, outcome, second_chance, sc_outcome)
+            rows.append(r)
         ss["game_data"].setdefault(ss["current_game"], []).extend(rows)
-        for r in rows:
-            _push_to_sheets_row(r)
+        for r in rows: _push_to_sheets_row(r)
         st.success(f"Added {len(rows)} entr{'y' if len(rows)==1 else 'ies'}.")
-
-        # Reset properly for next possession
         ss["selected_plays"].clear()
-        ss["game_clock_prefill"] = ""
         st.rerun()
 
-if dup_clicked:
-    rows_list = ss["game_data"].get(ss["current_game"], [])
-    if not rows_list:
-        st.warning("No previous entry to duplicate.")
-    else:
-        last = rows_list[-1].copy()
-        # If a game clock is provided, use it; else keep last timestamp
-        ts_val = game_clock.strip() if game_clock.strip() else last.get("Timestamp", "")
-        last["Timestamp"] = ts_val
-        ss["game_data"][ss["current_game"]].append(last)
-        _push_to_sheets_row(last)
-        st.success("Duplicated last entry.")
-
 # =======================
-# TABLE + EDIT/DELETE
+# TABLE + QUARTER FILTER + EDIT/DELETE
 # =======================
 df = pd.DataFrame(ss["game_data"].get(ss["current_game"], []))
 st.subheader(f"Logged Plays — {ss['current_game']}")
 if df.empty:
     st.info("No possessions yet.")
 else:
-    edit_df = df.copy().reset_index().rename(columns={"index":"Row"})
+    # Quarter filter so you can view prior quarters while continuing to log
+    fcol = st.columns([2,1,1,1])
+    with fcol[0]:
+        q_filter = st.multiselect("Filter by Quarter", ["Q1","Q2","Q3","Q4","OT"], default=["Q1","Q2","Q3","Q4","OT"])
+    view_df = df[df["Quarter"].isin(q_filter)] if q_filter else df
+
+    edit_df = view_df.copy().reset_index().rename(columns={"index":"Row"})
     edit_df["Select"] = False
     edited = st.data_editor(
         edit_df,
@@ -387,11 +439,15 @@ else:
     csave, cdelete, cexport = st.columns([1,1,1])
     with csave:
         if st.button("💾 Save Edits"):
-            merged = edited.drop(columns=["Select"]).set_index("Row").sort_index()
-            merged = merged[df.columns]
-            ss["game_data"][ss["current_game"]] = merged.to_dict(orient="records")
+            # Merge edits back into master df by Row index
+            updated = edited.drop(columns=["Select"]).set_index("Row").sort_index()
+            # Replace those rows in the original df
+            master = df.copy()
+            for row_idx, row_vals in updated.iterrows():
+                master.iloc[row_idx] = row_vals[master.columns]
+            ss["game_data"][ss["current_game"]] = master.to_dict(orient="records")
             if USE_SHEETS:
-                sheets_overwrite_game(ss["current_game"], merged)
+                sheets_overwrite_game(ss["current_game"], master)
             st.success("Edits saved.")
 
     with cdelete:
@@ -400,11 +456,10 @@ else:
             if not to_drop:
                 st.warning("No rows selected to delete.")
             else:
-                keep = edited[~edited["Select"]].drop(columns=["Select"]).set_index("Row").sort_index()
-                keep = keep[df.columns]
-                ss["game_data"][ss["current_game"]] = keep.to_dict(orient="records")
+                master = df.drop(index=to_drop).reset_index(drop=True)
+                ss["game_data"][ss["current_game"]] = master.to_dict(orient="records")
                 if USE_SHEETS:
-                    sheets_overwrite_game(ss["current_game"], keep)
+                    sheets_overwrite_game(ss["current_game"], master)
                 st.success(f"Deleted {len(to_drop)} row(s).")
 
     with cexport:
