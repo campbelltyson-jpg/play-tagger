@@ -396,4 +396,3 @@ else:
     with cexport:
         csv = df.to_csv(index=False).encode()
         st.download_button("⬇️ Download CSV", data=csv, file_name=f"{ss['current_game'].replace(' ','_')}.csv", mime="text/csv", use_container_width=True)
-
