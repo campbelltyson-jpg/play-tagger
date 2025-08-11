@@ -1,4 +1,4 @@
-# app.py — Play Tagger v7.0.1 (full)
+# app.py — Play Tagger v7.0.3 (unified pill chips + buttons)
 import streamlit as st
 import pandas as pd
 import altair as alt
@@ -7,7 +7,7 @@ from datetime import datetime
 # =======================
 # CONFIG
 # =======================
-st.set_page_config(page_title="Play Tagger v7.0.1", layout="wide")
+st.set_page_config(page_title="Play Tagger v7.0.3", layout="wide")
 
 def logo_image_bytes():
     try:
@@ -87,7 +87,6 @@ def sheets_overwrite_game(game_name: str, df: pd.DataFrame):
     if df.empty:
         ws.update("A1:K1", [GAME_HEADERS])
         return
-    # ensure column order
     for col in GAME_HEADERS:
         if col not in df.columns:
             df[col] = ""
@@ -126,12 +125,16 @@ def points_from_outcome(o: str) -> int:
 # CHIP HELPERS
 # =======================
 def chip_check_group(label, options, key, cols=4, default_selected=None):
-    """Checkbox-chip grid (multi). Stores a set in st.session_state[key]."""
+    """
+    Checkbox-chip grid (multi). Stores a set in st.session_state[key].
+    Returns a sorted list of selected items.
+    """
     st.markdown(f"**{label}**")
     if default_selected is None:
         default_selected = []
     st.session_state.setdefault(key, set(default_selected))
     selected = set(st.session_state[key])
+
     col_list = st.columns(cols)
     for i, opt in enumerate(options):
         with col_list[i % cols]:
@@ -153,20 +156,118 @@ ss.setdefault("game_meta", {})  # name -> {"quarter": "Q1", "opponent": "", "typ
 ss.setdefault("current_game", "Default Game")
 ss.setdefault("game_data", {})  # name -> list of dict rows
 ss.setdefault("roster", ["#1", "#2", "#3"])
-ss.setdefault("selected_plays", set())
 ss.setdefault("game_clock_min", 12)
 ss.setdefault("game_clock_sec", "59")
 ss.setdefault("pending_action", None)
 
 # =======================
-# CSS
+# CSS (v7.0.3 — unified pill chips + buttons)
 # =======================
 st.markdown(
-    "<style>"
-    ".stButton > button { border-radius: 999px; padding: 0.8rem 1.1rem; font-size: 1.05rem; }"
-    ".stDataFrame { border-radius: 10px; }"
-    ".quickbar button { margin-bottom: 6px; }"
-    "</style>",
+    """
+<style>
+/* ---------- Shared tokens (auto dark-mode) ---------- */
+:root {
+  --chip-bg: #f6f7f9;
+  --chip-fg: #111827;
+  --chip-border: #cfd4dc;
+  --chip-bg-active: #2563eb;
+  --chip-fg-active: #ffffff;
+  --chip-border-active: #1d4ed8;
+  --chip-bg-hover: #eef2ff;
+
+  --btn-bg: var(--chip-bg);
+  --btn-fg: var(--chip-fg);
+  --btn-border: var(--chip-border);
+  --btn-bg-hover: var(--chip-bg-hover);
+  --btn-bg-active: var(--chip-bg-active);
+  --btn-fg-active: var(--chip-fg-active);
+  --btn-border-active: var(--chip-border-active);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --chip-bg: #0f172a;
+    --chip-fg: #e5e7eb;
+    --chip-border: #334155;
+    --chip-bg-active: #3b82f6;
+    --chip-fg-active: #0b1220;
+    --chip-border-active: #60a5fa;
+    --chip-bg-hover: #1e293b;
+
+    --btn-bg: var(--chip-bg);
+    --btn-fg: var(--chip-fg);
+    --btn-border: var(--chip-border);
+    --btn-bg-hover: var(--chip-bg-hover);
+    --btn-bg-active: var(--chip-bg-active);
+    --btn-fg-active: var(--chip-fg-active);
+    --btn-border-active: var(--chip-border-active);
+  }
+}
+
+/* ---------- Convert checkboxes to pill chips ---------- */
+div[data-testid="stCheckbox"] {
+  display: inline-block;
+  margin: 6px 8px 6px 0;
+}
+div[data-testid="stCheckbox"] input[type="checkbox"] {
+  position: absolute; opacity: 0; pointer-events: none; width: 0; height: 0;
+}
+div[data-testid="stCheckbox"] label {
+  display: inline-flex; align-items: center; gap: .5rem;
+  padding: 8px 12px; border-radius: 9999px;
+  border: 1px solid var(--chip-border);
+  background: var(--chip-bg); color: var(--chip-fg);
+  font-weight: 600; cursor: pointer; user-select: none;
+  transition: background .15s ease, color .15s ease, border-color .15s ease, box-shadow .15s ease, transform .02s ease;
+}
+div[data-testid="stCheckbox"] label:hover { background: var(--chip-bg-hover); box-shadow: 0 1px 2px rgba(0,0,0,.08); }
+div[data-testid="stCheckbox"] label:active { transform: translateY(1px); }
+div[data-testid="stCheckbox"]:has(input:checked) label {
+  background: var(--chip-bg-active); color: var(--chip-fg-active);
+  border-color: var(--chip-border-active); box-shadow: 0 2px 6px rgba(37,99,235,.35);
+}
+
+/* ---------- Unify buttons to look like chips ---------- */
+.stButton > button {
+  border-radius: 9999px !important;
+  border: 1px solid var(--btn-border) !important;
+  background: var(--btn-bg) !important;
+  color: var(--btn-fg) !important;
+  padding: 10px 14px !important;
+  font-weight: 700 !important;
+  transition: background .15s ease, color .15s ease, border-color .15s ease, box-shadow .15s ease, transform .02s ease;
+}
+.stButton > button:hover { background: var(--btn-bg-hover) !important; box-shadow: 0 1px 2px rgba(0,0,0,.08) !important; }
+.stButton > button:active { transform: translateY(1px); }
+
+/* Make key action/quick-bar buttons appear "primary" */
+.stButton > button:has(span:contains("Confirm")),
+.stButton > button:has(span:contains("Add Entry")),
+.stButton > button:has(span:contains("Made ")),
+.stButton > button:has(span:contains("Miss ")),
+.stButton > button:has(span:contains("TO")),
+.stButton > button:has(span:contains("Timeout")),
+.stButton > button:has(span:contains("Dead Ball")),
+.stButton > button:has(span:contains("DB Foul")) {
+  background: var(--btn-bg-active) !important;
+  color: var(--btn-fg-active) !important;
+  border-color: var(--btn-border-active) !important;
+  box-shadow: 0 2px 6px rgba(37,99,235,.35) !important;
+}
+
+/* Quick Bar spacing hook */
+.quickbar-row .stButton > button { margin-bottom: 6px; }
+
+/* Dataframe rounding */
+.stDataFrame { border-radius: 10px; }
+
+/* Small screens */
+@media (max-width: 480px) {
+  div[data-testid="stCheckbox"] label { padding: 10px 14px; }
+  .stButton > button { padding: 12px 16px !important; }
+}
+</style>
+""",
     unsafe_allow_html=True
 )
 
@@ -219,7 +320,7 @@ with c2:
 status = "✅ Connected to Google Sheets" if sheets_connected else "⚠️ Running locally (no Sheets sync)"
 st.caption(status)
 
-st.title("🏀 Play Call Tagging v7.0.1")
+st.title("🏀 Play Call Tagging v7.0.3")
 
 # =======================
 # GAME MANAGER (TOP BAR)
@@ -320,29 +421,22 @@ with csec:
 game_clock = f"{ss['game_clock_min']}:{ss['game_clock_sec']}"
 
 # =======================
-# 2) PLAY NAMES — multi-select checkbox grid (4 cols)
+# 2) PLAY NAMES — chip multi-select (4 cols)
 # =======================
-st.markdown("**2) Select Play Name(s)**")
-cols = st.columns(4)
-selected = set(ss["selected_plays"])
-for i, name in enumerate(sorted(ss["plays_master"], key=str.lower)):
-    with cols[i % 4]:
-        checked = st.checkbox(name, value=(name in selected), key=f"play_chk_{name}")
-        if checked:
-            selected.add(name)
-        else:
-            selected.discard(name)
-ss["selected_plays"] = selected
+sel_plays = chip_check_group("2) Select Play Name(s)", ss["plays_master"], key="ms_plays", cols=4, default_selected=[])
+sel_plays_sorted = sorted(sel_plays, key=str.lower)
 
 # =======================
-# 3–6) Call Type / Caller / 2nd Chance / Outcomes (multi)
+# 3–6) Call Type / Caller / 2nd Chance / Outcomes (chips; Caller single-select)
 # =======================
 sel_call_types = chip_check_group("3) Call Type (multi)", CALL_TYPES, key="ms_call_types", cols=4, default_selected=[CALL_TYPES[0]])
 caller = st.radio("4) Who called it?", CALLERS, horizontal=True, index=0)
+
 second_chance = st.radio("5) 2nd Chance?", ["No","Yes"], horizontal=True, index=0)
-sc_outcome = None
+sel_sc_outcomes = []
 if second_chance == "Yes":
-    sc_outcome = st.radio("Second‑Chance Outcome", SECOND_CHANCE_OUTCOMES, horizontal=False, index=0)
+    sel_sc_outcomes = chip_check_group("Second‑Chance Outcomes (multi)", SECOND_CHANCE_OUTCOMES, key="ms_sc_outcomes", cols=4, default_selected=[])
+
 sel_outcomes = chip_check_group("6) Outcome (multi)", OUTCOMES, key="ms_outcomes", cols=4, default_selected=["Made 2","Made 3"])
 
 meta = ss["game_meta"][ss["current_game"]]
@@ -373,10 +467,20 @@ def _push_to_sheets_row(r):
             r["Quarter"], r["Opponent"], r["Game Type"]
         ])
 
+def _iters_for_logging(use_pending_outcome=None):
+    plays_iter = sel_plays_sorted or []
+    call_types_iter = sel_call_types or [CALL_TYPES[0]]
+    outcomes_iter = [use_pending_outcome] if use_pending_outcome else (sel_outcomes or ["Made 2"])
+    if second_chance == "Yes":
+        sc_iter = sel_sc_outcomes or [None]
+    else:
+        sc_iter = [None]
+    return plays_iter, call_types_iter, outcomes_iter, sc_iter
+
 # =======================
-# QUICK BAR (with Confirm) — uses multi Call Types
+# QUICK BAR (with Confirm) — unified look
 # =======================
-st.markdown("**Quick Bar**")
+st.markdown('<div class="quickbar-row">', unsafe_allow_html=True)
 q1, q2, q3, q4, q5, q6 = st.columns(6)
 if q1.button("Made 2"): ss["pending_action"] = "Made 2"
 if q1.button("Miss 2"): ss["pending_action"] = "Missed 2"
@@ -389,32 +493,35 @@ if q4.button("TO"): ss["pending_action"] = "Turnover"
 if q5.button("Dead Ball"): ss["pending_action"] = "Dead Ball"
 if q5.button("Timeout"): ss["pending_action"] = "Timeout"
 if q6.button("DB Foul"): ss["pending_action"] = "Dead Ball Foul"
+st.markdown('</div>', unsafe_allow_html=True)
 
 if ss.get("pending_action"):
     with st.container(border=True):
         st.write(
-            f"Pending: **{ss['pending_action']}** | Plays: **{', '.join(sorted(ss['selected_plays'])) or '(none)'}** "
-            f"| Call Types: **{', '.join(sel_call_types) or '(default)'}** | Clock: **{game_clock}** | Q: **{quarter}**"
+            f"Pending: **{ss['pending_action']}** | Plays: **{', '.join(sel_plays_sorted) or '(none)'}** "
+            f"| Call Types: **{', '.join(sel_call_types) or '(default)'}** | 2nd Chance: **{second_chance}** "
+            f"{'| SC Outcomes: ' + ', '.join(sel_sc_outcomes) if (second_chance=='Yes' and sel_sc_outcomes) else ''} "
+            f"| Clock: **{game_clock}** | Q: **{quarter}**"
         )
-        if second_chance == "Yes":
-            st.write(f"2nd‑Chance Outcome: **{sc_outcome or '(select)'}**")
         c1, c2 = st.columns([1,1])
         with c1:
             if st.button("Confirm"):
-                if not ss["selected_plays"]:
+                if not sel_plays_sorted:
                     st.warning("Select at least one play.")
                 else:
+                    plays_iter, call_types_iter, outcomes_iter, sc_iter = _iters_for_logging(use_pending_outcome=ss["pending_action"])
                     rows = []
-                    call_types_iter = sel_call_types or [CALL_TYPES[0]]
-                    for play in sorted(ss["selected_plays"], key=str.lower):
+                    for play in plays_iter:
                         for ct in call_types_iter:
-                            r = _row_dict(play, game_clock, ss["pending_action"], second_chance, sc_outcome, ct)
-                            rows.append(r)
+                            for oc in outcomes_iter:
+                                for scd in sc_iter:
+                                    r = _row_dict(play, game_clock, oc, second_chance, scd, ct)
+                                    rows.append(r)
                     ss["game_data"].setdefault(ss["current_game"], []).extend(rows)
                     for r in rows:
                         _push_to_sheets_row(r)
                     st.success(f"Logged {len(rows)} entr{'y' if len(rows)==1 else 'ies'} via Quick Bar.")
-                    ss["selected_plays"].clear()
+                    st.session_state["ms_plays"] = set()
                     ss["pending_action"] = None
                     st.rerun()
         with c2:
@@ -423,25 +530,25 @@ if ss.get("pending_action"):
                 st.info("Quick action canceled.")
 
 # =======================
-# STANDARD ADD ENTRY (multi × multi)
+# STANDARD ADD ENTRY (multi × multi × multi)
 # =======================
 if st.button("✅ Add Entry", use_container_width=True):
-    if not ss["selected_plays"]:
+    if not sel_plays_sorted:
         st.warning("Select at least one play.")
     else:
+        plays_iter, call_types_iter, outcomes_iter, sc_iter = _iters_for_logging()
         rows = []
-        call_types_iter = sel_call_types or [CALL_TYPES[0]]
-        outcomes_iter = sel_outcomes or ["Made 2"]
-        for play in sorted(ss["selected_plays"], key=str.lower):
+        for play in plays_iter:
             for ct in call_types_iter:
                 for oc in outcomes_iter:
-                    r = _row_dict(play, game_clock, oc, second_chance, sc_outcome, ct)
-                    rows.append(r)
+                    for scd in sc_iter:
+                        r = _row_dict(play, game_clock, oc, second_chance, scd, ct)
+                        rows.append(r)
         ss["game_data"].setdefault(ss["current_game"], []).extend(rows)
         for r in rows:
             _push_to_sheets_row(r)
         st.success(f"Added {len(rows)} entr{'y' if len(rows)==1 else 'ies'}.")
-        ss["selected_plays"].clear()
+        st.session_state["ms_plays"] = set()
         st.rerun()
 
 # =======================
