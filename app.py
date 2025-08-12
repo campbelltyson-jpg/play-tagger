@@ -1,12 +1,11 @@
-# app.py — Play Tagger v7.1
+# app.py — Play Tagger v7.1.1 (URL persistence + Sheets rehydrate)
 import streamlit as st
 import pandas as pd
 import altair as alt
 from datetime import datetime
 
 # ========= CONFIG =========
-st.set_page_config(page_title="Play Tagger v7.1", layout="wide")
-
+st.set_page_config(page_title="Play Tagger v7.1.1", layout="wide")
 AUTO_DEC_SECONDS = 8  # auto-decrement game clock after logging
 
 def logo_image_bytes():
@@ -15,6 +14,19 @@ def logo_image_bytes():
             return f.read()
     except Exception:
         return None
+
+# --- Query param helpers (Streamlit compatibility) ---
+def _get_qp():
+    try:
+        return dict(st.query_params)
+    except Exception:
+        return st.experimental_get_query_params()
+
+def _set_qp(**kwargs):
+    try:
+        st.query_params.update(kwargs)
+    except Exception:
+        st.experimental_set_query_params(**kwargs)
 
 # ========= GOOGLE SHEETS (optional) =========
 USE_SHEETS = False
@@ -43,7 +55,6 @@ def init_sheets():
         sh = gc.open_by_key(sheet_id)
         USE_SHEETS = True
 
-        # Ensure baseline tabs
         ws_names = [ws.title for ws in sh.worksheets()]
         if "Playbook" not in ws_names:
             sh.add_worksheet("Playbook", rows=1000, cols=3)
@@ -99,15 +110,11 @@ def sheets_add_game(game_name: str, game_type: str, opponent: str):
     get_or_create_game_ws(game_name)
 
 def sheets_rename_game(old_name: str, new_name: str, new_type: str, new_opp: str, df_game: pd.DataFrame):
-    """Copy-rename in Sheets: create new tab, write df, update Games row, delete old tab."""
-    # Create/update new worksheet with data
     sheets_overwrite_game(new_name, df_game)
-
-    # Update or insert Games row
     games_ws = sh.worksheet("Games")
     rows = games_ws.get_all_values()
     updated = False
-    for i, row in enumerate(rows[1:], start=2):  # skip header
+    for i, row in enumerate(rows[1:], start=2):
         if row and row[0] == old_name:
             games_ws.update(f"A{i}:C{i}", [[new_name, new_type, new_opp]])
             updated = True
@@ -115,20 +122,27 @@ def sheets_rename_game(old_name: str, new_name: str, new_type: str, new_opp: str
     if not updated:
         games_ws.append_row([new_name, new_type, new_opp, datetime.now().isoformat(timespec="seconds")],
                             value_input_option="USER_ENTERED")
-
-    # Remove old worksheet (if exists)
     old_title = game_ws_title(old_name)
     try:
         sh.del_worksheet(sh.worksheet(old_title))
     except Exception:
         pass
 
+# ---- Cached single-game reader (re-hydrate) ----
+@st.cache_data(ttl=5, show_spinner=False)
+def read_game_from_sheets(game_name: str, _bust: int = 0) -> pd.DataFrame:
+    if not sheets_connected:
+        return pd.DataFrame()
+    ws = get_or_create_game_ws(game_name)
+    rows = ws.get_all_records()
+    return pd.DataFrame(rows)
+
 # ========= DATA / CONSTANTS =========
 PLAY_NAMES = [
     "Flow","Zoom","Shake","Broken Play","Random","Transition","Delay","Pistol",
-    "7","Pitch","ATO","Open Sets","Elbow","Punch",
-    "Spain","Roll","Step","Iverson","Gets","77","Rub","Slice","Rifle",
-    "Triple Staggers","High","X","Flat 14","College","Mustang","Away"
+    "Chin Quick - Spain","Flex - Rifle","Pitch","ATO","Open Sets","Elbow","Punch",
+    "Spain","Roll","Step","Iverson","Flare - Quick","Line 1","Rub","Slice","Rifle",
+    "Triple Staggers","High","X","Flat 14","College","Mustang"
 ]
 CALL_TYPES_MASTER = ["Early Offense","Half Court","BLOB","SLOB","Zone"]
 CALLERS = ["Coach","Player"]
@@ -147,7 +161,6 @@ def points_from_outcome(o: str) -> int:
 
 # ========= CHIP HELPERS =========
 def chip_check_group(label, options, key, cols=4, default_selected=None):
-    """Checkbox-chip grid (multi). Stores a set in st.session_state[key]. Returns sorted list."""
     st.markdown(f"**{label}**")
     if default_selected is None: default_selected = []
     st.session_state.setdefault(key, set(default_selected))
@@ -165,10 +178,10 @@ def chip_check_group(label, options, key, cols=4, default_selected=None):
 ss = st.session_state
 ss.setdefault("plays_master", PLAY_NAMES.copy())
 ss.setdefault("games", ["Default Game"])
-ss.setdefault("game_meta", {})  # name -> {"quarter": "Q1", "opponent": "", "type": "Game"}
+ss.setdefault("game_meta", {})  # name -> {"quarter": "Q1","opponent":"","type":"Game"}
 ss.setdefault("current_game", "Default Game")
 ss.setdefault("game_data", {})  # name -> list of dict rows
-ss.setdefault("roster", ["#1", "#2", "#3"])
+ss.setdefault("roster", ["#1","#2","#3"])
 ss.setdefault("game_clock_min", 12)
 ss.setdefault("game_clock_sec", "00")
 ss.setdefault("pending_action", None)
@@ -176,48 +189,43 @@ ss.setdefault("call_types", set(["Half Court"]))
 ss.setdefault("second_chance", "No")
 ss.setdefault("sc_outcomes", set())
 ss.setdefault("credit_play", None)
+ss.setdefault("sheet_rev", 0)  # bump to bust cache after writes
+ss.setdefault("hide_create_row", False)
 
-# ========= CSS (unified pills + buttons, hides checkbox glyph) =========
+# ========= CSS (unified pills + buttons, hide check glyph) =========
 st.markdown(
     """
 <style>
 :root {
-  --chip-bg: #f6f7f9; --chip-fg: #111827; --chip-border: #cfd4dc;
-  --chip-bg-active: #2563eb; --chip-fg-active: #ffffff; --chip-border-active: #1d4ed8; --chip-bg-hover: #eef2ff;
-  --btn-bg: var(--chip-bg); --btn-fg: var(--chip-fg); --btn-border: var(--chip-border);
-  --btn-bg-hover: var(--chip-bg-hover); --btn-bg-active: var(--chip-bg-active); --btn-fg-active: var(--chip-fg-active); --btn-border-active: var(--chip-border-active);
+  --chip-bg:#f6f7f9;--chip-fg:#111827;--chip-border:#cfd4dc;
+  --chip-bg-active:#2563eb;--chip-fg-active:#ffffff;--chip-border-active:#1d4ed8;--chip-bg-hover:#eef2ff;
+  --btn-bg:var(--chip-bg);--btn-fg:var(--chip-fg);--btn-border:var(--chip-border);
+  --btn-bg-hover:var(--chip-bg-hover);--btn-bg-active:var(--chip-bg-active);--btn-fg-active:var(--chip-fg-active);--btn-border-active:var(--chip-border-active);
 }
-@media (prefers-color-scheme: dark) {
-  :root {
-    --chip-bg: #0f172a; --chip-fg: #e5e7eb; --chip-border: #334155;
-    --chip-bg-active: #3b82f6; --chip-fg-active: #0b1220; --chip-border-active: #60a5fa; --chip-bg-hover: #1e293b;
-    --btn-bg: var(--chip-bg); --btn-fg: var(--chip-fg); --btn-border: var(--chip-border);
-    --btn-bg-hover: var(--chip-bg-hover); --btn-bg-active: var(--chip-bg-active); --btn-fg-active: var(--chip-fg-active); --btn-border-active: var(--chip-border-active);
+@media (prefers-color-scheme: dark){
+  :root{
+    --chip-bg:#0f172a;--chip-fg:#e5e7eb;--chip-border:#334155;
+    --chip-bg-active:#3b82f6;--chip-fg-active:#0b1220;--chip-border-active:#60a5fa;--chip-bg-hover:#1e293b;
+    --btn-bg:var(--chip-bg);--btn-fg:var(--chip-fg);--btn-border:var(--chip-border);
+    --btn-bg-hover:var(--chip-bg-hover);--btn-bg-active:var(--chip-bg-active);--btn-fg-active:var(--chip-fg-active);--btn-border-active:var(--chip-border-active);
   }
 }
-/* Chip base */
 div[data-testid="stCheckbox"]{display:inline-block;margin:6px 8px 6px 0;}
 div[data-testid="stCheckbox"] input[type="checkbox"]{position:absolute;opacity:0;pointer-events:none;width:0;height:0;}
 div[data-testid="stCheckbox"] label{
   display:inline-flex;align-items:center;gap:.5rem;padding:8px 12px;border-radius:9999px;border:1px solid var(--chip-border);
-  background:var(--chip-bg);color:var(--chip-fg);font-weight:600;cursor:pointer;user-select:none;
-  transition:background .15s,color .15s,border-color .15s,box-shadow .15s,transform .02s;
+  background:var(--chip-bg);color:var(--chip-fg);font-weight:600;cursor:pointer;user-select:none;transition:background .15s,color .15s,border-color .15s,box-shadow .15s,transform .02s;
 }
-/* hide any internal check glyphs Streamlit might render */
 div[data-testid="stCheckbox"] svg{display:none !important;}
 div[data-testid="stCheckbox"] label:hover{background:var(--chip-bg-hover);box-shadow:0 1px 2px rgba(0,0,0,.08);}
 div[data-testid="stCheckbox"] label:active{transform:translateY(1px);}
-div[data-testid="stCheckbox"]:has(input:checked) label{
-  background:var(--chip-bg-active);color:var(--chip-fg-active);border-color:var(--chip-border-active);box-shadow:0 2px 6px rgba(37,99,235,.35);
-}
-/* Buttons like chips */
+div[data-testid="stCheckbox"]:has(input:checked) label{background:var(--chip-bg-active);color:var(--chip-fg-active);border-color:var(--chip-border-active);box-shadow:0 2px 6px rgba(37,99,235,.35);}
 .stButton > button{
   border-radius:9999px !important;border:1px solid var(--btn-border) !important;background:var(--btn-bg) !important;color:var(--btn-fg) !important;
   padding:10px 14px !important;font-weight:700 !important;transition:background .15s,color .15s,border-color .15s,box-shadow .15s,transform .02s;
 }
 .stButton > button:hover{background:var(--btn-bg-hover) !important;box-shadow:0 1px 2px rgba(0,0,0,.08) !important;}
 .stButton > button:active{transform:translateY(1px);}
-/* primary-tinted buttons */
 .stButton > button:has(span:contains("Confirm")), .stButton > button:has(span:contains("Add Entry")),
 .stButton > button:has(span:contains("Made ")), .stButton > button:has(span:contains("Miss ")),
 .stButton > button:has(span:contains("TO")), .stButton > button:has(span:contains("Timeout")), .stButton > button:has(span:contains("Dead Ball")), .stButton > button:has(span:contains("DB Foul")){
@@ -231,7 +239,7 @@ div[data-testid="stCheckbox"]:has(input:checked) label{
     unsafe_allow_html=True
 )
 
-# ========= INIT SHEETS + HYDRATE =========
+# ========= INIT SHEETS + HYDRATE LISTS =========
 sheets_connected = init_sheets()
 if sheets_connected:
     try:
@@ -255,18 +263,31 @@ if sheets_connected:
     except Exception:
         pass
 
-ss["game_data"].setdefault(ss["current_game"], [])
-ss["game_meta"].setdefault(ss["current_game"], {"quarter":"Q1","opponent":"","type":"Game"})
-
-# ========= HEADER + LOGO + STATUS =========
+# ========= LOGO + STATUS =========
 c1, c2, c3 = st.columns([1,2,1])
 with c2:
     _logo = logo_image_bytes()
     if _logo: st.image(_logo, use_container_width=True)
 st.caption("✅ Connected to Google Sheets" if sheets_connected else "⚠️ Running locally (no Sheets sync)")
-st.title("🏀 Play Call Tagging v7.1")
+st.title("🏀 Play Call Tagging v7.1.1")
 
-# ========= GAME MANAGER (Unified Create ↔ Current) =========
+# ========= URL -> current game, ensure valid =========
+ss["game_data"].setdefault(ss["current_game"], [])
+ss["game_meta"].setdefault(ss["current_game"], {"quarter":"Q1","opponent":"","type":"Game"})
+
+_qp = _get_qp()
+qp_game = None
+if "game" in _qp:
+    v = _qp["game"]
+    qp_game = v[0] if isinstance(v, list) else v
+if qp_game and qp_game in ss["games"]:
+    ss["current_game"] = qp_game
+else:
+    if ss["current_game"] not in ss["games"]:
+        ss["current_game"] = ss["games"][0]
+_set_qp(game=ss["current_game"])
+
+# ========= GAME MANAGER =========
 gm1, gm2, gm3, gm4 = st.columns([2,2,2,2])
 with gm1:
     current_game = st.selectbox(
@@ -276,13 +297,16 @@ with gm1:
     )
     if current_game != ss["current_game"]:
         ss["current_game"] = current_game
-        ss["game_data"].setdefault(ss["current_game"], [])
+        _set_qp(game=ss["current_game"])
+        # Rehydrate from Sheets
+        if sheets_connected:
+            df_h = read_game_from_sheets(ss["current_game"], ss["sheet_rev"])
+            ss["game_data"][ss["current_game"]] = df_h.to_dict("records") if not df_h.empty else []
         ss["game_meta"].setdefault(ss["current_game"], {"quarter":"Q1","opponent":"","type":"Game"})
 
 meta = ss["game_meta"].setdefault(ss["current_game"], {"quarter":"Q1","opponent":"","type":"Game"})
 
-# Compact create row, hidden once a game is created this session
-if "hide_create_row" not in ss: ss["hide_create_row"] = False
+# Create row (compact) shown until one game created this session
 if not ss["hide_create_row"]:
     cg1, cg2, cg3, cg4 = st.columns([2,1.2,1.8,1])
     with cg1:
@@ -302,6 +326,10 @@ if not ss["hide_create_row"]:
                     sheets_add_game(new_name, new_type, new_opp)
                 ss["current_game"] = new_name
                 ss["hide_create_row"] = True
+                _set_qp(game=ss["current_game"])
+                if sheets_connected:
+                    df_h = read_game_from_sheets(ss["current_game"], ss["sheet_rev"])
+                    ss["game_data"][ss["current_game"]] = df_h.to_dict("records") if not df_h.empty else []
                 st.success(f"Created game: {new_name}")
                 st.rerun()
             else:
@@ -318,60 +346,32 @@ with e3:
 with e4:
     with st.expander("Rename Game (copy-rename in Sheets)"):
         new_game_name = st.text_input("New Game Name", value=ss["current_game"])
-        danger = st.checkbox("Also remove old sheet after copying (safe default: ON)", value=True)
         if st.button("Run Rename"):
             if new_game_name.strip() and new_game_name != ss["current_game"]:
-                # Prepare current df
                 df_current = pd.DataFrame(ss["game_data"].get(ss["current_game"], []))
-                # Sheets copy-rename
                 if sheets_connected:
                     try:
                         sheets_rename_game(ss["current_game"], new_game_name, meta.get("type","Game"), meta.get("opponent",""), df_current)
                     except Exception as e:
                         st.error(f"Sheets rename failed: {e}")
-                # Local rename
                 ss["game_data"][new_game_name] = ss["game_data"].pop(ss["current_game"], [])
                 ss["game_meta"][new_game_name] = ss["game_meta"].pop(ss["current_game"])
-                # Update list & selection
                 if new_game_name not in ss["games"]:
                     ss["games"].append(new_game_name)
                 if ss["current_game"] in ss["games"]:
                     ss["games"].remove(ss["current_game"])
                 ss["current_game"] = new_game_name
+                _set_qp(game=ss["current_game"])
                 st.success(f"Renamed game to: {new_game_name}")
                 st.rerun()
             else:
                 st.warning("Enter a different new name.")
 
-# ========= SIDEBAR — Playbook (add) =========
-with st.sidebar:
-    st.header("Manage Playbook")
-    np = st.text_input("Play Name")
-    if st.button("➕ Add Play"):
-        if np.strip():
-            if np not in ss["plays_master"]:
-                ss["plays_master"].append(np)
-                ss["plays_master"].sort()
-                if sheets_connected:
-                    sh.worksheet("Playbook").append_row(["", np, ""], value_input_option="USER_ENTERED")
-            st.success(f"Added play: {np}")
-            st.rerun()
-        else:
-            st.warning("Enter a play name.")
-
 # ========= 1) GAME CLOCK — chips + nudges =========
 st.markdown("**1) Game clock**")
 
-def mmss_to_tuple(mmss: str):
-    try:
-        m, s = mmss.split(":"); return int(m), int(s)
-    except Exception:
-        return 12, 0
-
 def tuple_to_mmss(m: int, s: int):
-    s = max(0, min(59, s))
-    m = max(0, min(12, m))
-    return f"{m}:{s:02d}"
+    s = max(0, min(59, s)); m = max(0, min(12, m)); return f"{m}:{s:02d}"
 
 def add_seconds(m: int, s: int, delta: int):
     total = m*60 + s + delta
@@ -467,6 +467,11 @@ def push_row(r: dict):
                 r["Outcome"], r["Points"], r["2nd Chance?"], r["2nd Chance Outcome"],
                 r["Quarter"], r["Opponent"], r["Game Type"]
             ])
+            # Bust cache & rehydrate from Sheets
+            ss["sheet_rev"] += 1
+            read_game_from_sheets.clear()
+            df_h = read_game_from_sheets(ss["current_game"], ss["sheet_rev"])
+            ss["game_data"][ss["current_game"]] = df_h.to_dict("records") if not df_h.empty else []
         except Exception as e:
             st.error(f"Sheets append failed: {e}")
 
@@ -494,7 +499,7 @@ if ss.get("pending_action"):
     with st.container(border=True):
         st.write(
             f"Pending: **{ss['pending_action']}** | Plays: **{', '.join(sel_plays_sorted) or '(none)'}** "
-            f"| Credit: **{ss.get('credit_play') or '(pick one)'}** | Call Type(s): **{join_pipe(sel_call_types) or '(default Half Court)'}** "
+            f"| Credit: **{ss.get('credit_play') or '(pick one)'}** | Call Type(s): **{join_pipe(sel_call_types) or '(Half Court)'}** "
             f"| 2nd Chance: **{second_chance}** {'| SC: '+join_pipe(sel_sc_outcomes) if (second_chance=='Yes' and sel_sc_outcomes) else ''} "
             f"| Clock: **{game_clock}** | Q: **{meta.get('quarter','Q1')}**"
         )
@@ -508,7 +513,6 @@ if ss.get("pending_action"):
                 else:
                     row = build_row_from_ui(ss["pending_action"])
                     push_row(row)
-                    # reset quick bits (keep call types sticky for speed)
                     ss["pending_action"] = None
                     ss["ms_plays"] = set()
                     auto_decrement_clock()
@@ -519,7 +523,12 @@ if ss.get("pending_action"):
                 ss["pending_action"] = None
                 st.info("Quick action canceled.")
 
-# ========= TABLE + EDIT/DELETE =========
+# ========= TABLE (ensure hydration if empty) =========
+if sheets_connected and not ss["game_data"].get(ss["current_game"]):
+    df_h = read_game_from_sheets(ss["current_game"], ss["sheet_rev"])
+    if not df_h.empty:
+        ss["game_data"][ss["current_game"]] = df_h.to_dict("records")
+
 df = pd.DataFrame(ss["game_data"].get(ss["current_game"], []))
 st.subheader(f"Logged Plays — {ss['current_game']}")
 if df.empty:
@@ -554,6 +563,10 @@ else:
             ss["game_data"][ss["current_game"]] = master.to_dict(orient="records")
             if sheets_connected:
                 sheets_overwrite_game(ss["current_game"], master)
+                ss["sheet_rev"] += 1
+                read_game_from_sheets.clear()
+                df_h = read_game_from_sheets(ss["current_game"], ss["sheet_rev"])
+                ss["game_data"][ss["current_game"]] = df_h.to_dict("records") if not df_h.empty else []
             st.success("Edits saved.")
     with cdelete:
         if st.button("🗑️ Delete Selected"):
@@ -565,6 +578,10 @@ else:
                 ss["game_data"][ss["current_game"]] = master.to_dict(orient="records")
                 if sheets_connected:
                     sheets_overwrite_game(ss["current_game"], master)
+                    ss["sheet_rev"] += 1
+                    read_game_from_sheets.clear()
+                    df_h = read_game_from_sheets(ss["current_game"], ss["sheet_rev"])
+                    ss["game_data"][ss["current_game"]] = df_h.to_dict("records") if not df_h.empty else []
                 st.success(f"Deleted {len(to_drop)} row(s).")
     with cexport:
         csv = df.to_csv(index=False).encode()
@@ -574,7 +591,6 @@ else:
 st.divider()
 st.subheader("📊 Live Dashboard")
 
-# Auto-refresh controls
 ar_col1, ar_col2, _ = st.columns([1,1,3])
 with ar_col1:
     auto_refresh = st.toggle("Auto‑refresh", value=False)
@@ -595,7 +611,6 @@ else:
     }
     vis["OutcomeShort"] = vis["Outcome"].map(outcome_map).fillna(vis["Outcome"])
 
-    # Stacked outcomes by Call Type
     call_stack = (
         alt.Chart(vis)
         .mark_bar()
@@ -608,7 +623,6 @@ else:
         .properties(height=300, title="Outcomes by Call Type (stacked)")
     )
 
-    # Cumulative PPP by possession order
     def mmss_to_seconds(s):
         try:
             m, sec = s.split(":"); return int(m)*60 + int(sec)
@@ -632,15 +646,13 @@ else:
         .properties(height=260, title="Cumulative PPP (live)")
     )
 
-    # PPP Leaderboard (by Credit Play)
     cred = vis.copy()
-    # attempts: 1 per row; credit goes only to 'Credit Play'
     grouped = cred.groupby("Credit Play", dropna=False).agg(
         Attempts=("Points","count"),
         Points=("Points","sum")
     ).reset_index().rename(columns={"Credit Play":"Play"})
     grouped["PPP"] = grouped["Points"] / grouped["Attempts"]
-    grouped = grouped[grouped["Play"].fillna("") != ""]  # drop blank credit
+    grouped = grouped[grouped["Play"].fillna("") != ""]
     min_attempts = st.slider("Min attempts for leaderboard", 1, 10, 3)
     topN = st.slider("Top N rows", 5, 20, 10)
     board = grouped[grouped["Attempts"] >= min_attempts].sort_values(["PPP","Attempts"], ascending=[False,False]).head(topN)
@@ -670,6 +682,8 @@ with st.expander("🧰 Google Sheets — Status & Postgame Upload"):
                         "TEST","Test Play | Pistol","Pistol","Half Court","Coach",
                         "Turnover",0,"No","", "Q1","Test Opp","Game"
                     ])
+                    ss["sheet_rev"] += 1
+                    read_game_from_sheets.clear()
                     st.success("Wrote a test row to the game worksheet.")
                 except Exception as e:
                     st.error(f"Test write failed: {e}")
@@ -695,6 +709,8 @@ with st.expander("🧰 Google Sheets — Status & Postgame Upload"):
                             r.get("Outcome",""), r.get("Points",0), r.get("2nd Chance?",""), r.get("2nd Chance Outcome",""),
                             r.get("Quarter",""), r.get("Opponent",""), r.get("Game Type","")
                         ])
+                ss["sheet_rev"] += 1
+                read_game_from_sheets.clear()
                 st.success(f"Uploaded {len(df_up)} rows into '{target_game}'.")
             except Exception as e:
                 st.error(f"Upload failed: {e}")
