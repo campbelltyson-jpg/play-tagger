@@ -1,11 +1,11 @@
-# app.py — Play Tagger v7.1.1 (URL persistence + Sheets rehydrate)
+# app.py — Play Tagger v7.1.2 (unified gray→red chips + URL persistence + Sheets rehydrate)
 import streamlit as st
 import pandas as pd
 import altair as alt
 from datetime import datetime
 
 # ========= CONFIG =========
-st.set_page_config(page_title="Play Tagger v7.1.1", layout="wide")
+st.set_page_config(page_title="Play Tagger v7.1.2", layout="wide")
 AUTO_DEC_SECONDS = 8  # auto-decrement game clock after logging
 
 def logo_image_bytes():
@@ -189,51 +189,79 @@ ss.setdefault("call_types", set(["Half Court"]))
 ss.setdefault("second_chance", "No")
 ss.setdefault("sc_outcomes", set())
 ss.setdefault("credit_play", None)
-ss.setdefault("sheet_rev", 0)  # bump to bust cache after writes
+ss.setdefault("sheet_rev", 0)
 ss.setdefault("hide_create_row", False)
 
-# ========= CSS (unified pills + buttons, hide check glyph) =========
+# ========= CSS (unified gray → red) =========
 st.markdown(
     """
 <style>
-:root {
-  --chip-bg:#f6f7f9;--chip-fg:#111827;--chip-border:#cfd4dc;
-  --chip-bg-active:#2563eb;--chip-fg-active:#ffffff;--chip-border-active:#1d4ed8;--chip-bg-hover:#eef2ff;
-  --btn-bg:var(--chip-bg);--btn-fg:var(--chip-fg);--btn-border:var(--chip-border);
-  --btn-bg-hover:var(--chip-bg-hover);--btn-bg-active:var(--chip-bg-active);--btn-fg-active:var(--chip-fg-active);--btn-border-active:var(--chip-border-active);
+/* ===== Chip palette: Gray default, Red active ===== */
+:root{
+  --chip-gray:#e5e7eb;          /* light gray */
+  --chip-gray-fg:#111827;       /* dark text */
+  --chip-gray-border:#cfd4dc;
+  --chip-gray-hover:#f3f4f6;
+
+  --chip-red:#ef4444;           /* red active */
+  --chip-red-fg:#ffffff;
+  --chip-red-border:#dc2626;
+
+  /* Buttons use same scheme so clock minis match */
+  --btn-bg:var(--chip-gray);
+  --btn-fg:var(--chip-gray-fg);
+  --btn-border:var(--chip-gray-border);
+  --btn-bg-hover:var(--chip-gray-hover);
+  --btn-bg-active:var(--chip-red);
+  --btn-fg-active:var(--chip-red-fg);
+  --btn-border-active:var(--chip-red-border);
 }
+/* Dark mode palette */
 @media (prefers-color-scheme: dark){
   :root{
-    --chip-bg:#0f172a;--chip-fg:#e5e7eb;--chip-border:#334155;
-    --chip-bg-active:#3b82f6;--chip-fg-active:#0b1220;--chip-border-active:#60a5fa;--chip-bg-hover:#1e293b;
-    --btn-bg:var(--chip-bg);--btn-fg:var(--chip-fg);--btn-border:var(--chip-border);
-    --btn-bg-hover:var(--chip-bg-hover);--btn-bg-active:var(--chip-bg-active);--btn-fg-active:var(--chip-fg-active);--btn-border-active:var(--chip-border-active);
+    --chip-gray:#1f2937; --chip-gray-fg:#e5e7eb; --chip-gray-border:#374151; --chip-gray-hover:#111827;
   }
 }
+
+/* ==== Checkbox "chips" (Play Names, Call Types, etc.) ==== */
 div[data-testid="stCheckbox"]{display:inline-block;margin:6px 8px 6px 0;}
 div[data-testid="stCheckbox"] input[type="checkbox"]{position:absolute;opacity:0;pointer-events:none;width:0;height:0;}
 div[data-testid="stCheckbox"] label{
-  display:inline-flex;align-items:center;gap:.5rem;padding:8px 12px;border-radius:9999px;border:1px solid var(--chip-border);
-  background:var(--chip-bg);color:var(--chip-fg);font-weight:600;cursor:pointer;user-select:none;transition:background .15s,color .15s,border-color .15s,box-shadow .15s,transform .02s;
+  display:inline-flex;align-items:center;gap:.5rem;padding:8px 12px;border-radius:9999px;border:1px solid var(--chip-gray-border);
+  background:var(--chip-gray);color:var(--chip-gray-fg);font-weight:700;cursor:pointer;user-select:none;
+  transition:background .15s,color .15s,border-color .15s,box-shadow .15s,transform .02s;
 }
+/* hide any internal check icon */
 div[data-testid="stCheckbox"] svg{display:none !important;}
-div[data-testid="stCheckbox"] label:hover{background:var(--chip-bg-hover);box-shadow:0 1px 2px rgba(0,0,0,.08);}
+div[data-testid="stCheckbox"] label:hover{background:var(--chip-gray-hover);box-shadow:0 1px 2px rgba(0,0,0,.06);}
 div[data-testid="stCheckbox"] label:active{transform:translateY(1px);}
-div[data-testid="stCheckbox"]:has(input:checked) label{background:var(--chip-bg-active);color:var(--chip-fg-active);border-color:var(--chip-border-active);box-shadow:0 2px 6px rgba(37,99,235,.35);}
-.stButton > button{
-  border-radius:9999px !important;border:1px solid var(--btn-border) !important;background:var(--btn-bg) !important;color:var(--btn-fg) !important;
-  padding:10px 14px !important;font-weight:700 !important;transition:background .15s,color .15s,border-color .15s,box-shadow .15s,transform .02s;
+div[data-testid="stCheckbox"]:has(input:checked) label{
+  background:var(--chip-red);color:var(--chip-red-fg);border-color:var(--chip-red-border);
+  box-shadow:0 2px 6px rgba(239,68,68,.35);
 }
-.stButton > button:hover{background:var(--btn-bg-hover) !important;box-shadow:0 1px 2px rgba(0,0,0,.08) !important;}
+
+/* ==== Buttons styled as chips (clock minis, quick bar, etc.) ==== */
+.stButton > button{
+  border-radius:9999px !important;border:1px solid var(--btn-border) !important;
+  background:var(--btn-bg) !important;color:var(--btn-fg) !important;
+  padding:10px 14px !important;font-weight:800 !important;
+  transition:background .15s,color .15s,border-color .15s,box-shadow .15s,transform .02s;
+}
+.stButton > button:hover{background:var(--btn-bg-hover) !important;box-shadow:0 1px 2px rgba(0,0,0,.06) !important;}
 .stButton > button:active{transform:translateY(1px);}
-.stButton > button:has(span:contains("Confirm")), .stButton > button:has(span:contains("Add Entry")),
-.stButton > button:has(span:contains("Made ")), .stButton > button:has(span:contains("Miss ")),
-.stButton > button:has(span:contains("TO")), .stButton > button:has(span:contains("Timeout")), .stButton > button:has(span:contains("Dead Ball")), .stButton > button:has(span:contains("DB Foul")){
-  background:var(--btn-bg-active) !important;color:var(--btn-fg-active) !important;border-color:var(--btn-border-active) !important;box-shadow:0 2px 6px rgba(37,99,235,.35) !important;
+
+/* When we add the confirm-primary class, make it red */
+.stButton > button.confirm-primary{
+  background:var(--btn-bg-active) !important;color:var(--btn-fg-active) !important;border-color:var(--btn-border-active) !important;
+  box-shadow:0 2px 6px rgba(239,68,68,.35) !important;
 }
 .quickbar-row .stButton > button{margin-bottom:6px;}
 .stDataFrame{border-radius:10px;}
-@media (max-width:480px){div[data-testid="stCheckbox"] label{padding:10px 14px;}.stButton > button{padding:12px 16px !important;}}
+
+@media (max-width:480px){
+  div[data-testid="stCheckbox"] label{padding:10px 14px;}
+  .stButton > button{padding:12px 16px !important;}
+}
 </style>
 """,
     unsafe_allow_html=True
@@ -269,7 +297,7 @@ with c2:
     _logo = logo_image_bytes()
     if _logo: st.image(_logo, use_container_width=True)
 st.caption("✅ Connected to Google Sheets" if sheets_connected else "⚠️ Running locally (no Sheets sync)")
-st.title("🏀 Play Call Tagging v7.1.1")
+st.title("🏀 Play Call Tagging v7.1.2")
 
 # ========= URL -> current game, ensure valid =========
 ss["game_data"].setdefault(ss["current_game"], [])
@@ -298,7 +326,6 @@ with gm1:
     if current_game != ss["current_game"]:
         ss["current_game"] = current_game
         _set_qp(game=ss["current_game"])
-        # Rehydrate from Sheets
         if sheets_connected:
             df_h = read_game_from_sheets(ss["current_game"], ss["sheet_rev"])
             ss["game_data"][ss["current_game"]] = df_h.to_dict("records") if not df_h.empty else []
@@ -370,9 +397,6 @@ with e4:
 # ========= 1) GAME CLOCK — chips + nudges =========
 st.markdown("**1) Game clock**")
 
-def tuple_to_mmss(m: int, s: int):
-    s = max(0, min(59, s)); m = max(0, min(12, m)); return f"{m}:{s:02d}"
-
 def add_seconds(m: int, s: int, delta: int):
     total = m*60 + s + delta
     total = max(0, min(12*60, total))
@@ -418,6 +442,22 @@ with n6:
         ss["game_clock_sec"] = "00"
 
 game_clock = f"{ss['game_clock_min']}:{ss['game_clock_sec']}"
+
+# Highlight current minute/second buttons in red (matches chip scheme)
+st.markdown(f"""
+<style>
+.stButton > button:has(span:contains("{ss['game_clock_min']}")) {{
+  background: var(--btn-bg-active) !important;
+  color: var(--btn-fg-active) !important;
+  border-color: var(--btn-border-active) !important;
+}}
+.stButton > button:has(span:contains("{int(ss['game_clock_sec']):02d}")) {{
+  background: var(--btn-bg-active) !important;
+  color: var(--btn-fg-active) !important;
+  border-color: var(--btn-border-active) !important;
+}}
+</style>
+""", unsafe_allow_html=True)
 
 # ========= 2) PLAY NAMES + CREDIT PLAY =========
 sel_plays = chip_check_group("2) Select Play Name(s)", ss["plays_master"], key="ms_plays", cols=4, default_selected=[])
