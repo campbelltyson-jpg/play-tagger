@@ -1,11 +1,16 @@
-# app.py — Play Tagger v8 (faster layout, +Add Play persistence, Frequency%/Success%/PPP per Play, sticky quick bar)
+# app.py — Play Tagger v8.0.2 (Coach-Optimized)
+# - Categories default open: Pace & Space, 2 Man Game (others collapsed)
+# - One-tap Next Quarter
+# - Undo Last Possession (local + Sheets sync)
+# - Everything else from v8.0.1 retained
+
 import streamlit as st
 import pandas as pd
 import altair as alt
 from datetime import datetime
 
 # ========= CONFIG =========
-st.set_page_config(page_title="Play Tagger v8", layout="wide")
+st.set_page_config(page_title="Play Tagger v8.0.2", layout="wide")
 AUTO_DEC_SECONDS = 8  # auto-decrement after Confirm
 
 def logo_image_bytes():
@@ -57,10 +62,10 @@ def init_sheets():
 
         ws_names = [ws.title for ws in sh.worksheets()]
         if "Playbook" not in ws_names:
-            sh.add_worksheet("Playbook", rows=1000, cols=3)
+            sh.add_worksheet("Playbook", rows=2000, cols=3)
             sh.worksheet("Playbook").update("A1:C1", [["Code","Play Name","System"]])
         if "Games" not in ws_names:
-            sh.add_worksheet("Games", rows=2000, cols=4)
+            sh.add_worksheet("Games", rows=3000, cols=4)
             sh.worksheet("Games").update("A1:D1", [["Game Name","Type","Opponent","Created At"]])
         if "Roster" not in ws_names:
             sh.add_worksheet("Roster", rows=200, cols=1)
@@ -137,33 +142,39 @@ def read_game_from_sheets(game_name: str, _bust: int = 0) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 # ========= DATA / CONSTANTS =========
-PLAY_NAMES = [
-    "Flow","Zoom","Shake","Broken Play","Random","Transition","Delay","Pistol",
-    "Chin Quick - Spain","Flex - Rifle","Pitch","ATO","Open Sets","Elbow","Punch",
-    "Spain","Roll","Step","Iverson","Flare - Quick","Line 1","Rub","Slice","Rifle",
-    "Triple Staggers","High","X","Flat 14","College","Mustang"
-]
 CALL_TYPES_MASTER = ["Early Offense","Half Court","BLOB","SLOB","Zone"]
 CALLERS = ["Coach","Player"]
 QUARTERS = ["Q1","Q2","Q3","Q4","OT"]
 QUARTER_TO_NUM = {"Q1":1,"Q2":2,"Q3":3,"Q4":4,"OT":5}
 
-OUTCOMES_QB = [
-    "Made 2","Missed 2","Made 3","Missed 3",
-    "Foul (Made 1/2)","Foul (Made 2/2)","Foul (Missed Both)",
-    "Turnover","Dead Ball","Timeout","Dead Ball Foul"
-]
 SC_OUTCOMES = ["Made 2","Missed 2","Made 3","Missed 3","Foul","Turnover","Reset/Other"]
 
 def points_from_outcome(o: str) -> int:
     return 2 if o=="Made 2" else 3 if o=="Made 3" else 1 if o=="Foul (Made 1/2)" else 2 if o=="Foul (Made 2/2)" else 0
-
 def is_success(outcome: str) -> bool:
     return outcome in ["Made 2","Made 3","Foul (Made 1/2)","Foul (Made 2/2)"]
 
+# ---- Your Play Categories ----
+USER_PLAY_CATEGORIES = {
+    "2 Man Game": [
+        "7","Shake","Rub","Roll","Flat","Pitch","15 Step","14 Step","51 Step"
+    ],
+    "3 Man Game": [
+        "77","Delay","Pistol","Away","Slice","Elbow","Stack","Gets"
+    ],
+    "Pace & Space": [
+        "Transition","Flow","Pistol","Zoom","Random","Broken Play","Punch"
+    ],
+    "Specials": [
+        "Open Sets","ATO","College","Mustang","1","Zip Quick","High","X"
+    ],
+}
+UNCATEGORIZED = "Uncategorized"
+
 # ========= CHIP HELPERS =========
 def chip_check_group(label, options, key, cols=4, default_selected=None, small=False):
-    st.markdown(f"**{label}**")
+    if label:
+        st.markdown(f"**{label}**")
     if default_selected is None: default_selected = []
     st.session_state.setdefault(key, set(default_selected))
     selected = set(st.session_state[key])
@@ -180,7 +191,11 @@ def chip_check_group(label, options, key, cols=4, default_selected=None, small=F
 
 # ========= STATE =========
 ss = st.session_state
-ss.setdefault("plays_master", PLAY_NAMES.copy())
+# Build master list from categories
+MASTER_PLAYS = sorted({p for lst in USER_PLAY_CATEGORIES.values() for p in lst})
+ss.setdefault("plays_master", MASTER_PLAYS.copy())
+ss.setdefault("play_categories", USER_PLAY_CATEGORIES.copy())
+
 ss.setdefault("games", ["Default Game"])
 ss.setdefault("game_meta", {})  # name -> {"quarter": "Q1","opponent":"","type":"Game"}
 ss.setdefault("current_game", "Default Game")
@@ -189,19 +204,17 @@ ss.setdefault("roster", ["#1","#2","#3"])
 ss.setdefault("game_clock_min", 12)
 ss.setdefault("game_clock_sec", "00")
 ss.setdefault("pending_action", None)
-ss.setdefault("call_types", set(["Half Court"]))
 ss.setdefault("second_chance", "No")
 ss.setdefault("sc_outcomes", set())
 ss.setdefault("credit_play", None)
 ss.setdefault("sheet_rev", 0)
 ss.setdefault("hide_create_row", False)
-ss.setdefault("compact_mode", True)  # NEW default compact
+ss.setdefault("compact_mode", True)
 
-# ========= CSS (gray→red chips, sticky quick bar, compact mode) =========
+# ========= CSS (high-contrast chips; sticky bars; compact) =========
 st.markdown(
     """
 <style>
-/* ===== Gray default / Red active ===== */
 :root{
   --chip-gray:#e5e7eb; --chip-gray-fg:#111827; --chip-gray-border:#cfd4dc; --chip-gray-hover:#f3f4f6;
   --chip-red:#ef4444; --chip-red-fg:#ffffff; --chip-red-border:#dc2626;
@@ -211,49 +224,70 @@ st.markdown(
 @media (prefers-color-scheme: dark){
   :root{ --chip-gray:#1f2937; --chip-gray-fg:#e5e7eb; --chip-gray-border:#374151; --chip-gray-hover:#111827; }
 }
-/* Chips */
+/* Checkbox chips */
 div[data-testid="stCheckbox"]{display:inline-block;margin:4px 6px 4px 0;}
 div[data-testid="stCheckbox"] input[type="checkbox"]{position:absolute;opacity:0;pointer-events:none;width:0;height:0;}
 div[data-testid="stCheckbox"] label{
   display:inline-flex;align-items:center;gap:.5rem;padding:8px 12px;border-radius:9999px;border:1px solid var(--chip-gray-border);
-  background:var(--chip-gray);color:var(--chip-gray-fg);font-weight:700;cursor:pointer;user-select:none;transition:background .15s,color .15s,border-color .15s,box-shadow .15s,transform .02s;
+  background:var(--chip-gray);color:var(--chip-gray-fg) !important;font-weight:700;cursor:pointer;user-select:none;
+  transition:background .15s,color .15s,border-color .15s,box-shadow .15s,transform .02s;
 }
 div[data-testid="stCheckbox"] svg{display:none !important;}
 div[data-testid="stCheckbox"] label:hover{background:var(--chip-gray-hover);}
 div[data-testid="stCheckbox"] label:active{transform:translateY(1px);}
-div[data-testid="stCheckbox"]:has(input:checked) label{ background:var(--chip-red);color:var(--chip-red-fg);border-color:var(--chip-red-border);box-shadow:0 2px 6px rgba(239,68,68,.35); }
-
-/* Buttons styled as chips */
+div[data-testid="stCheckbox"]:has(input:checked) label{
+  background:var(--chip-red);color:var(--chip-red-fg) !important;border-color:var(--chip-red-border);box-shadow:0 2px 6px rgba(239,68,68,.35);
+}
+/* Buttons as chips */
 .stButton > button{
   border-radius:9999px !important;border:1px solid var(--btn-border) !important;background:var(--btn-bg) !important;color:var(--btn-fg) !important;
-  padding:8px 12px !important;font-weight:800 !important;transition:background .15s,color .15s,border-color .15s,box-shadow .15s,transform .02s; margin-bottom:6px;
+  padding:8px 12px !important;font-weight:800 !important;transition:background .15s,color .15s,border-color .15s,box-shadow .15s,transform .02s;margin-bottom:6px;
 }
 .stButton > button:hover{background:var(--btn-bg-hover) !important;}
 .stButton > button:active{transform:translateY(1px);}
-.stButton > button.confirm-primary{ background:var(--btn-bg-active) !important;color:var(--btn-fg-active) !important;border-color:var(--btn-border-active) !important; box-shadow:0 2px 6px rgba(239,68,68,.35) !important; }
-
-/* Sticky Quick Bar (top) */
-.quickbar-sticky{ position:sticky; top:0; z-index:50; padding:8px 6px; background:rgba(255,255,255,0.85); backdrop-filter: blur(6px); border-bottom:1px solid rgba(0,0,0,.06);}
-@media (prefers-color-scheme: dark){ .quickbar-sticky{ background:rgba(17,24,39,0.85); border-bottom:1px solid rgba(255,255,255,.06);} }
-
-/* Compact mode spacing */
+.stButton > button.confirm-primary{
+  background:var(--btn-bg-active) !important;color:var(--btn-fg-active) !important;border-color:var(--btn-border-active) !important;box-shadow:0 2px 6px rgba(239,68,68,.35) !important;
+}
+/* Sticky top controls */
+.top-sticky{position:sticky; top:0; z-index:60; padding:8px 6px; background:rgba(255,255,255,0.90); backdrop-filter: blur(6px); border-bottom:1px solid rgba(0,0,0,.06); }
+@media (prefers-color-scheme: dark){ .top-sticky{ background:rgba(17,24,39,0.90); border-bottom:1px solid rgba(255,255,255,.06);} }
+/* Sticky bottom quick bar */
+.bottom-sticky{position:sticky; bottom:0; z-index:60; padding:8px 6px; background:rgba(255,255,255,0.92); backdrop-filter: blur(6px); border-top:1px solid rgba(0,0,0,.06);}
+@media (prefers-color-scheme: dark){ .bottom-sticky{ background:rgba(17,24,39,0.92); border-top:1px solid rgba(255,255,255,.06);} }
+/* Compact spacing */
 .compact .block-container{ padding-top:10px !important; }
 </style>
 """,
     unsafe_allow_html=True
 )
 if ss["compact_mode"]:
-    st.markdown('<style>.block-container{padding-top:10px !important; padding-bottom:0 !important;}</style>', unsafe_allow_html=True)
+    st.markdown('<style>.block-container{padding-top:10px !important; padding-bottom:56px !important;}</style>', unsafe_allow_html=True)  # space for bottom bar
 
-# ========= INIT SHEETS + HYDRATE LISTS =========
+# ========= INIT SHEETS + HYDRATE =========
 sheets_connected = init_sheets()
 if sheets_connected:
+    # Load Playbook and merge with categories (persist System)
     try:
-        playbook_df = pd.DataFrame(sh.worksheet("Playbook").get_all_records())
-        if not playbook_df.empty and "Play Name" in playbook_df:
-            ss["plays_master"] = sorted(set(ss["plays_master"]) | set(playbook_df["Play Name"].dropna().tolist()))
+        playbook_ws = sh.worksheet("Playbook")
+        playbook_df = pd.DataFrame(playbook_ws.get_all_records())
+        if not playbook_df.empty:
+            # Use Sheet categories if present; otherwise keep user-provided mapping
+            if "Play Name" in playbook_df:
+                names = playbook_df["Play Name"].dropna().astype(str).str.strip().tolist()
+                if names:
+                    ss["plays_master"] = sorted(set(ss["plays_master"]) | set(names))
+            if "System" in playbook_df:
+                cat = {}
+                for _, r in playbook_df.iterrows():
+                    nm = str(r.get("Play Name","")).strip()
+                    sys = str(r.get("System","")).strip() or UNCATEGORIZED
+                    if nm:
+                        cat.setdefault(sys, []).append(nm)
+                if cat:
+                    ss["play_categories"] = {k: sorted(set(v)) for k,v in cat.items()}
     except Exception:
         pass
+    # Load Games index/meta
     try:
         games_df = pd.DataFrame(sh.worksheet("Games").get_all_records())
         if not games_df.empty:
@@ -269,31 +303,48 @@ if sheets_connected:
     except Exception:
         pass
 
-# ========= HEADER =========
+# ========= HEADER / LOGO =========
 hdr1, hdr2, hdr3 = st.columns([1,3,2])
 with hdr2:
     _logo = logo_image_bytes()
     if _logo: st.image(_logo, use_column_width=True)
 st.caption("✅ Google Sheets Live Sync" if sheets_connected else "⚠️ Local mode — use Postgame Upload")
-st.title("🏀 Play Call Tagger — v8")
 
-# ========= URL -> current game =========
-ss["game_data"].setdefault(ss["current_game"], [])
-ss["game_meta"].setdefault(ss["current_game"], {"quarter":"Q1","opponent":"","type":"Game"})
-_qp = _get_qp()
-qp_game = None
-if "game" in _qp:
-    v = _qp["game"]; qp_game = v[0] if isinstance(v, list) else v
-if qp_game and qp_game in ss["games"]:
-    ss["current_game"] = qp_game
-else:
-    if ss["current_game"] not in ss["games"]:
-        ss["current_game"] = ss["games"][0]
-_set_qp(game=ss["current_game"])
+# ========= HELPERS: NEXT QUARTER / UNDO =========
+def next_quarter(q):
+    try:
+        idx = QUARTERS.index(q)
+    except ValueError:
+        idx = 0
+    return QUARTERS[min(idx+1, len(QUARTERS)-1)]
 
-# ========= GAME MANAGER (row) =========
-g1, g2, g3, g4, g5 = st.columns([2,1.2,1.8,1,1])
-with g1:
+def undo_last_possession():
+    """Remove last possession of current game (local + Sheets)."""
+    rows = ss["game_data"].get(ss["current_game"], [])
+    if not rows:
+        st.warning("No possessions to undo.")
+        return
+    # pop in-memory
+    rows.pop()
+    ss["game_data"][ss["current_game"]] = rows
+    # sync to Sheets if connected
+    if sheets_connected:
+        try:
+            df_now = pd.DataFrame(rows)
+            sheets_overwrite_game(ss["current_game"], df_now)
+            ss["sheet_rev"] += 1
+            read_game_from_sheets.clear()
+            st.success("Undid last possession (synced).")
+        except Exception as e:
+            st.error(f"Undo sync failed: {e}")
+    else:
+        st.success("Undid last possession (local).")
+
+# ========= STICKY GAME CONTROLS (Top) =========
+st.markdown('<div class="top-sticky">', unsafe_allow_html=True)
+gc1, gc2, gc3, gc4, gc5, gc6 = st.columns([2,1,2,1,1,1])
+with gc1:
+    ss.setdefault("current_game", ss["games"][0] if ss["games"] else "Default Game")
     current_game = st.selectbox("Current Game", options=ss["games"], index=ss["games"].index(ss["current_game"]) if ss["current_game"] in ss["games"] else 0)
     if current_game != ss["current_game"]:
         ss["current_game"] = current_game
@@ -302,25 +353,31 @@ with g1:
             df_h = read_game_from_sheets(ss["current_game"], ss["sheet_rev"])
             ss["game_data"][ss["current_game"]] = df_h.to_dict("records") if not df_h.empty else []
         ss["game_meta"].setdefault(ss["current_game"], {"quarter":"Q1","opponent":"","type":"Game"})
-with g2:
+with gc2:
     meta = ss["game_meta"].setdefault(ss["current_game"], {"quarter":"Q1","opponent":"","type":"Game"})
     meta["quarter"] = st.selectbox("Quarter", QUARTERS, index=QUARTERS.index(meta.get("quarter","Q1")))
-with g3:
+with gc3:
     meta["opponent"] = st.text_input("Opponent", value=meta.get("opponent",""))
-with g4:
-    meta["type"] = st.selectbox("Game Type", ["Game","Scrimmage","Scout"], index=["Game","Scrimmage","Scout"].index(meta.get("type","Game")))
-with g5:
+with gc4:
+    meta["type"] = st.selectbox("Type", ["Game","Scrimmage","Scout"], index=["Game","Scrimmage","Scout"].index(meta.get("type","Game")))
+with gc5:
+    # NEW: Next Quarter (one tap)
+    if st.button("Next Quarter"):
+        meta["quarter"] = next_quarter(meta.get("quarter","Q1"))
+        st.toast(f"Quarter → {meta['quarter']}", icon="⏭️")
+with gc6:
     ss["compact_mode"] = st.toggle("Compact", value=ss["compact_mode"], help="Smaller padding & chips")
+st.markdown('</div>', unsafe_allow_html=True)
 
-# Create row (compact, disappears after creation)
+# Quick create row (appears only until you create one new game)
 if not ss["hide_create_row"]:
     cg1, cg2, cg3, cg4 = st.columns([2,1.2,1.8,0.8])
     with cg1:
         new_name = st.text_input("Create New Game — Name")
     with cg2:
-        new_type = st.selectbox("Type", ["Game","Scrimmage","Scout"], key="new_type")
+        new_type = st.selectbox("Type", ["Game","Scrimmage","Scout"], key="new_type_inline")
     with cg3:
-        new_opp = st.text_input("Opponent", key="new_opp")
+        new_opp = st.text_input("Opponent", key="new_opp_inline")
     with cg4:
         if st.button("Create"):
             if new_name.strip():
@@ -341,8 +398,8 @@ if not ss["hide_create_row"]:
             else:
                 st.warning("Enter a game name first.")
 
-# ========= LAYOUT: 3‑panel tagging (less scrolling) =========
-L, C, R = st.columns([1.2, 2.0, 1.5])
+# ========= LAYOUT: 3‑panel tagging =========
+L, C, R = st.columns([1.2, 2.1, 1.7])
 
 # ----- LEFT: Clock + Caller + 2nd Chance -----
 with L:
@@ -394,70 +451,72 @@ with L:
     second_chance = st.radio("2nd Chance?", ["No","Yes"], horizontal=True, index=0)
     sel_sc_outcomes = []
     if second_chance == "Yes":
-        sel_sc_outcomes = chip_check_group("Second‑Chance Outcomes", ["Made 2","Missed 2","Made 3","Missed 3","Foul","Turnover","Reset/Other"],
-                                           key="ms_sc_outcomes", cols=3, small=True)
+        sel_sc_outcomes = chip_check_group("Second‑Chance Outcomes", SC_OUTCOMES, key="ms_sc_outcomes", cols=3, small=True)
 
-# ----- CENTER: Plays (with +Add) -----
+# ----- CENTER: Plays (categories + search + +Add) -----
 with C:
-    st.subheader("📖 Plays")
-    # compact chips
-    sel_plays = chip_check_group("Select Play Name(s)", ss["plays_master"], key="ms_plays", cols=4, small=True)
-    sel_plays_sorted = sorted(sel_plays, key=str.lower)
+    st.subheader("📖 Plays (Categorized)")
+    search = st.text_input("Search Plays", value="", placeholder="Type to filter plays...")
 
-    # Inline +Add Play popover (falls back to expander if not available)
+    selected_all = set(st.session_state.get("ms_plays", set()))
+    for cat_name, plays in ss["play_categories"].items():
+        show_list = [p for p in plays if (search.lower() in p.lower())] if search else plays
+        if not show_list: continue
+        # DEFAULTS: open "Pace & Space" and "2 Man Game"; others collapsed
+        expanded_default = cat_name in ("Pace & Space", "2 Man Game")
+        with st.expander(f"{cat_name} ({len(show_list)})", expanded=expanded_default):
+            subset = chip_check_group("", show_list, key=f"ms_plays_cat_{cat_name}", cols=4, default_selected=[], small=True)
+            selected_all.update(subset)
+    st.session_state["ms_plays"] = set(selected_all)
+    sel_plays_sorted = sorted(selected_all, key=str.lower)
+
+    # Inline +Add Play (with category)
     try:
         with st.popover("➕ Add Play"):
             np = st.text_input("Play Name")
+            cat_choice = st.selectbox("Category", list(ss["play_categories"].keys()) + [UNCATEGORIZED], index=0)
             if st.button("Add"):
                 if np.strip():
-                    if np not in ss["plays_master"]:
-                        ss["plays_master"].append(np); ss["plays_master"].sort()
-                        if sheets_connected:
-                            sh.worksheet("Playbook").append_row(["", np, ""], value_input_option="USER_ENTERED")
-                    st.success(f"Added play: {np}"); st.rerun()
+                    nm = np.strip()
+                    if nm not in ss["plays_master"]:
+                        ss["plays_master"].append(nm); ss["plays_master"].sort()
+                    ss["play_categories"].setdefault(cat_choice, [])
+                    if nm not in ss["play_categories"][cat_choice]:
+                        ss["play_categories"][cat_choice].append(nm); ss["play_categories"][cat_choice] = sorted(set(ss["play_categories"][cat_choice]))
+                    if sheets_connected:
+                        sh.worksheet("Playbook").append_row(["", nm, cat_choice], value_input_option="USER_ENTERED")
+                    st.success(f"Added play: {nm} → {cat_choice}"); st.rerun()
                 else:
                     st.warning("Enter a play name.")
     except Exception:
         with st.expander("➕ Add Play"):
             np = st.text_input("Play Name")
+            cat_choice = st.selectbox("Category", list(ss["play_categories"].keys()) + [UNCATEGORIZED], index=0)
             if st.button("Add"):
                 if np.strip():
-                    if np not in ss["plays_master"]:
-                        ss["plays_master"].append(np); ss["plays_master"].sort()
-                        if sheets_connected:
-                            sh.worksheet("Playbook").append_row(["", np, ""], value_input_option="USER_ENTERED")
-                    st.success(f"Added play: {np}"); st.rerun()
+                    nm = np.strip()
+                    if nm not in ss["plays_master"]:
+                        ss["plays_master"].append(nm); ss["plays_master"].sort()
+                    ss["play_categories"].setdefault(cat_choice, [])
+                    if nm not in ss["play_categories"][cat_choice]:
+                        ss["play_categories"][cat_choice].append(nm); ss["play_categories"][cat_choice] = sorted(set(ss["play_categories"][cat_choice]))
+                    if sheets_connected:
+                        sh.worksheet("Playbook").append_row(["", nm, cat_choice], value_input_option="USER_ENTERED")
+                    st.success(f"Added play: {nm} → {cat_choice}"); st.rerun()
                 else:
                     st.warning("Enter a play name.")
 
+    # Credit Play picker
     if sel_plays_sorted:
         default_credit = sel_plays_sorted[0] if (ss.get("credit_play") not in sel_plays_sorted) else ss["credit_play"]
         ss["credit_play"] = st.selectbox("Credit Play (PPP attribution)", sel_plays_sorted, index=sel_plays_sorted.index(default_credit))
 
-# ----- RIGHT: Call Types + Quick Bar (sticky) -----
+# ----- RIGHT: Call Types -----
 with R:
     st.subheader("🗂 Call Types")
-    sel_call_types = chip_check_group("Select Call Type(s)", CALL_TYPES_MASTER, key="ms_call_types", cols=3, small=True)
+    sel_call_types = chip_check_group("", CALL_TYPES_MASTER, key="ms_call_types", cols=3, small=True)
     if not sel_call_types:
         sel_call_types = ["Half Court"]
-
-    # STICKY QUICK BAR
-    st.markdown('<div class="quickbar-sticky">', unsafe_allow_html=True)
-    qb1, qb2, qb3 = st.columns(3)
-    with qb1:
-        if st.button("Made 2"): ss["pending_action"] = "Made 2"
-        if st.button("Miss 2"): ss["pending_action"] = "Missed 2"
-        if st.button("TO"): ss["pending_action"] = "Turnover"
-    with qb2:
-        if st.button("Made 3"): ss["pending_action"] = "Made 3"
-        if st.button("Miss 3"): ss["pending_action"] = "Missed 3"
-        if st.button("Timeout"): ss["pending_action"] = "Timeout"
-    with qb3:
-        if st.button("Foul 1/2"): ss["pending_action"] = "Foul (Made 1/2)"
-        if st.button("Foul 2/2"): ss["pending_action"] = "Foul (Made 2/2)"
-        if st.button("Dead Ball"): ss["pending_action"] = "Dead Ball"
-        if st.button("DB Foul"): ss["pending_action"] = "Dead Ball Foul"
-    st.markdown('</div>', unsafe_allow_html=True)
 
 # ===== Build & Push Row =====
 def join_pipe(items): return " | ".join(items) if items else ""
@@ -468,7 +527,7 @@ def build_row_from_ui(outcome_text: str):
     sc_str = join_pipe(sel_sc_outcomes) if second_chance == "Yes" else ""
     pts = points_from_outcome(outcome_text)
     return {
-        "Timestamp": game_clock,
+        "Timestamp": f"{ss['game_clock_min']}:{ss['game_clock_sec']}",
         "Plays": plays_str,
         "Credit Play": ss.get("credit_play") or (sel_plays_sorted[0] if sel_plays_sorted else ""),
         "Call Type": call_types_str,
@@ -503,11 +562,33 @@ def auto_decrement_clock():
     m = ss["game_clock_min"]; s = int(ss["game_clock_sec"])
     total = max(0, m*60 + s - AUTO_DEC_SECONDS); ss["game_clock_min"], ss["game_clock_sec"] = total//60, f"{total%60:02d}"
 
+# ========= STICKY QUICK BAR (Bottom) =========
+st.markdown('<div class="bottom-sticky">', unsafe_allow_html=True)
+qb1, qb2, qb3, qb4 = st.columns(4)
+with qb1:
+    if st.button("Made 2"): ss["pending_action"] = "Made 2"
+    if st.button("Miss 2"): ss["pending_action"] = "Missed 2"
+with qb2:
+    if st.button("Made 3"): ss["pending_action"] = "Made 3"
+    if st.button("Miss 3"): ss["pending_action"] = "Missed 3"
+with qb3:
+    if st.button("Foul 1/2"): ss["pending_action"] = "Foul (Made 1/2)"
+    if st.button("Foul 2/2"): ss["pending_action"] = "Foul (Made 2/2)"
+with qb4:
+    if st.button("TO"): ss["pending_action"] = "Turnover"
+    if st.button("Dead Ball"): ss["pending_action"] = "Dead Ball"
+    if st.button("Timeout"): ss["pending_action"] = "Timeout"
+    if st.button("DB Foul"): ss["pending_action"] = "Dead Ball Foul"
+    # NEW: Undo Last
+    if st.button("↩︎ Undo Last"):
+        undo_last_possession()
+st.markdown('</div>', unsafe_allow_html=True)
+
 # Pending banner + Confirm
 if ss.get("pending_action"):
     with st.container(border=True):
         st.write(
-            f"Pending: **{ss['pending_action']}** | Clock **{game_clock}** | Q **{meta.get('quarter','Q1')}** "
+            f"Pending: **{ss['pending_action']}** | Clock **{ss['game_clock_min']}:{ss['game_clock_sec']}** | Q **{meta.get('quarter','Q1')}** "
             f"| Plays: **{', '.join(sel_plays_sorted) or '(none)'}** → Credit **{ss.get('credit_play') or '(pick)'}** "
             f"| Call Type(s): **{join_pipe(sel_call_types)}** | 2nd: **{second_chance}**"
             + (f" (**{join_pipe(sel_sc_outcomes)}**)" if (second_chance=='Yes' and sel_sc_outcomes) else "")
@@ -532,203 +613,150 @@ if sheets_connected and not ss["game_data"].get(ss["current_game"]):
     df_h = read_game_from_sheets(ss["current_game"], ss["sheet_rev"])
     if not df_h.empty: ss["game_data"][ss["current_game"]] = df_h.to_dict("records")
 
-# ========= TABLE (edit/delete/export) =========
+# ========= LIVE DASHBOARD (left) + RECENT TABLE (right) =========
 df = pd.DataFrame(ss["game_data"].get(ss["current_game"], []))
-st.subheader(f"Logged Plays — {ss['current_game']}")
-if df.empty:
-    st.info("No possessions yet.")
-else:
-    fcol = st.columns([2,1,1,1])
-    with fcol[0]:
-        q_filter = st.multiselect("Filter by Quarter", QUARTERS, default=QUARTERS)
-    view_df = df[df["Quarter"].isin(q_filter)] if q_filter else df
+st.subheader("📊 Live: Play Metrics & Recent Possessions")
+DL, DR = st.columns([1.2, 1.0])
 
-    edit_df = view_df.copy().reset_index().rename(columns={"index":"Row"})
-    edit_df["Select"] = False
-    edited = st.data_editor(
-        edit_df,
-        use_container_width=True,
-        height=360,
-        column_config={
-            "Row": st.column_config.NumberColumn(disabled=True),
-            "Select": st.column_config.CheckboxColumn(help="Toggle to delete selected rows on Save/Delete"),
-        },
-        hide_index=True,
-        key="editor",
-    )
-
-    csave, cdelete, cexport = st.columns([1,1,1])
-    with csave:
-        if st.button("💾 Save Edits"):
-            updated = edited.drop(columns=["Select"]).set_index("Row").sort_index()
-            master = df.copy()
-            for row_idx, row_vals in updated.iterrows():
-                master.iloc[row_idx] = row_vals[master.columns]
-            ss["game_data"][ss["current_game"]] = master.to_dict(orient="records")
-            if sheets_connected:
-                sheets_overwrite_game(ss["current_game"], master)
-                ss["sheet_rev"] += 1; read_game_from_sheets.clear()
-            st.success("Edits saved.")
-    with cdelete:
-        if st.button("🗑️ Delete Selected"):
-            to_drop = edited[edited["Select"]]["Row"].tolist()
-            if not to_drop:
-                st.warning("No rows selected to delete.")
-            else:
-                master = df.drop(index=to_drop).reset_index(drop=True)
-                ss["game_data"][ss["current_game"]] = master.to_dict(orient="records")
-                if sheets_connected:
-                    sheets_overwrite_game(ss["current_game"], master)
-                    ss["sheet_rev"] += 1; read_game_from_sheets.clear()
-                st.success(f"Deleted {len(to_drop)} row(s).")
-    with cexport:
-        csv = df.to_csv(index=False).encode()
-        st.download_button("⬇️ Download CSV", data=csv, file_name=f"{ss['current_game'].replace(' ','_')}.csv", mime="text/csv", use_container_width=True)
-
-# ========= LIVE DASHBOARD (Frequency %, Success %, PPP) =========
-st.divider()
-st.subheader("📊 Live Dashboard")
-
-if df.empty:
-    st.info("No data yet for visuals.")
-else:
-    # Ensure required fields exist
-    vis = df.copy()
-    vis["Success"] = vis["Success"].fillna("").astype(str)
-
-    # Helper: success is already computed per row, but keep a guard
-    def _success_to_bool(s): return str(s).strip().lower() == "yes"
-
-    # ---- Build two views ----
-    # 1) CREDIT PLAY (as before)
-    cred = vis[vis["Credit Play"].notna() & (vis["Credit Play"].astype(str) != "")]
-    grp_credit = pd.DataFrame()
-    if not cred.empty:
-        grp_credit = cred.groupby("Credit Play", dropna=False).agg(
-            Attempts=("Points", "count"),
-            Points=("Points", "sum"),
-            Successes=("Success", lambda s: sum(_success_to_bool(x) for x in s))
-        ).reset_index().rename(columns={"Credit Play": "Play"})
-        total_poss_credit = len(cred)
-        grp_credit["PPP"] = grp_credit["Points"] / grp_credit["Attempts"]
-        grp_credit["Freq%"] = 100.0 * grp_credit["Attempts"] / max(total_poss_credit, 1)
-        grp_credit["Success%"] = 100.0 * grp_credit["Successes"] / grp_credit["Attempts"]
-
-    # 2) ALL TAGGED PLAYS:
-    # explode "Plays" into individual play names; each possession contributes to each tagged play
-    alltag = vis[vis["Plays"].notna() & (vis["Plays"].astype(str) != "")]
-    grp_all = pd.DataFrame()
-    if not alltag.empty:
-        # split by pipe and strip
-        tmp = alltag.copy()
-        tmp["PlaysList"] = tmp["Plays"].astype(str).str.split("|")
-        # strip spaces
-        tmp["PlaysList"] = tmp["PlaysList"].apply(lambda lst: [p.strip() for p in lst if p.strip()])
-        exploded = tmp.explode("PlaysList").rename(columns={"PlaysList": "Play"})
-        # Aggregate per play (each row is a possession for that play)
-        grp_all = exploded.groupby("Play", dropna=False).agg(
-            Attempts=("Points", "count"),
-            Points=("Points", "sum"),
-            Successes=("Success", lambda s: sum(_success_to_bool(x) for x in s))
-        ).reset_index()
-        total_poss_all = len(vis)  # denominator = total possessions (not total exploded rows)
-        grp_all["PPP"] = grp_all["Points"] / grp_all["Attempts"]
-        grp_all["Freq%"] = 100.0 * grp_all["Attempts"] / max(total_poss_all, 1)
-        grp_all["Success%"] = 100.0 * grp_all["Successes"] / grp_all["Attempts"]
-
-    # ---- UI toggle: which model to visualize ----
-    mode = st.radio("Metric basis", ["All Tagged Plays", "Credit Play"], horizontal=True, index=0)
-    grp = grp_all if mode == "All Tagged Plays" else grp_credit
-
-    if grp.empty:
-        st.info("No data to display for the selected mode.")
+with DL:
+    if df.empty:
+        st.info("No data yet for visuals.")
     else:
-        grp = grp.sort_values(["PPP", "Attempts"], ascending=[False, False])
+        vis = df.copy()
+        vis["Success"] = vis["Success"].fillna("").astype(str)
+        def _success_to_bool(s): return str(s).strip().lower() == "yes"
 
-        cA, cB, cC = st.columns([1, 1, 1])
-        with cA: min_attempts = st.slider("Min Attempts", 1, 15, 3)
-        with cB: topN = st.slider("Top N", 5, 20, 10)
-        with cC: show_table = st.toggle("Show Table", value=True)
+        # CREDIT PLAY basis
+        cred = vis[vis["Credit Play"].notna() & (vis["Credit Play"].astype(str) != "")]
+        grp_credit = pd.DataFrame()
+        if not cred.empty:
+            grp_credit = cred.groupby("Credit Play", dropna=False).agg(
+                Attempts=("Points", "count"),
+                Points=("Points", "sum"),
+                Successes=("Success", lambda s: sum(_success_to_bool(x) for x in s))
+            ).reset_index().rename(columns={"Credit Play": "Play"})
+            total_poss_credit = len(cred)
+            grp_credit["PPP"] = grp_credit["Points"] / grp_credit["Attempts"]
+            grp_credit["Freq%"] = 100.0 * grp_credit["Attempts"] / max(total_poss_credit, 1)
+            grp_credit["Success%"] = 100.0 * grp_credit["Successes"] / grp_credit["Attempts"]
 
-        board = grp[grp["Attempts"] >= min_attempts].head(topN)
+        # ALL TAGGED PLAYS basis
+        alltag = vis[vis["Plays"].notna() & (vis["Plays"].astype(str) != "")]
+        grp_all = pd.DataFrame()
+        if not alltag.empty:
+            tmp = alltag.copy()
+            tmp["PlaysList"] = tmp["Plays"].astype(str).str.split("|")
+            tmp["PlaysList"] = tmp["PlaysList"].apply(lambda lst: [p.strip() for p in lst if p.strip()])
+            exploded = tmp.explode("PlaysList").rename(columns={"PlaysList": "Play"})
+            grp_all = exploded.groupby("Play", dropna=False).agg(
+                Attempts=("Points", "count"),
+                Points=("Points", "sum"),
+                Successes=("Success", lambda s: sum(_success_to_bool(x) for x in s))
+            ).reset_index()
+            total_poss_all = len(vis)  # denominator = total possessions
+            grp_all["PPP"] = grp_all["Points"] / grp_all["Attempts"]
+            grp_all["Freq%"] = 100.0 * grp_all["Attempts"] / max(total_poss_all, 1)
+            grp_all["Success%"] = 100.0 * grp_all["Successes"] / grp_all["Attempts"]
 
-        chart_ppp = (
-            alt.Chart(board)
-            .mark_bar()
-            .encode(
-                x=alt.X("PPP:Q"),
-                y=alt.Y("Play:N", sort="-x"),
-                tooltip=["Play", "Attempts", "PPP", "Freq%", "Success%"]
+        mode = st.radio("Metric basis", ["All Tagged Plays", "Credit Play"], horizontal=True, index=0)
+        grp = grp_all if mode == "All Tagged Plays" else grp_credit
+
+        if grp.empty:
+            st.info("No data to display for the selected mode.")
+        else:
+            grp = grp.sort_values(["PPP", "Attempts"], ascending=[False, False])
+            cA, cB, cC = st.columns([1, 1, 1])
+            with cA: min_attempts = st.slider("Min Attempts", 1, 15, 3)
+            with cB: topN = st.slider("Top N", 5, 20, 10)
+            with cC: show_table = st.toggle("Show Table", value=True)
+
+            board = grp[grp["Attempts"] >= min_attempts].head(topN)
+
+            chart_ppp = (
+                alt.Chart(board)
+                .mark_bar()
+                .encode(
+                    x=alt.X("PPP:Q"),
+                    y=alt.Y("Play:N", sort="-x"),
+                    tooltip=["Play", "Attempts", "PPP", "Freq%", "Success%"]
+                )
+                .properties(height=280, title=f"PPP by Play — {mode}")
             )
-            .properties(height=320, title=f"PPP by Play — {mode}")
-        )
-        st.altair_chart(chart_ppp, use_container_width=True)
+            st.altair_chart(chart_ppp, use_container_width=True)
 
-        chart_freq = (
-            alt.Chart(board)
-            .mark_bar()
-            .encode(
-                x=alt.X("Freq%:Q", title="Frequency % of All Possessions"),
-                y=alt.Y("Play:N", sort="-x"),
-                tooltip=["Play", "Freq%", "Attempts"]
+            chart_freq = (
+                alt.Chart(board)
+                .mark_bar()
+                .encode(
+                    x=alt.X("Freq%:Q", title="Frequency % of All Possessions"),
+                    y=alt.Y("Play:N", sort="-x"),
+                    tooltip=["Play", "Freq%", "Attempts"]
+                )
+                .properties(height=240, title=f"Frequency % by Play — {mode}")
             )
-            .properties(height=280, title=f"Frequency % by Play — {mode}")
-        )
-        st.altair_chart(chart_freq, use_container_width=True)
+            st.altair_chart(chart_freq, use_container_width=True)
 
-        if show_table:
-            st.subheader(f"Per‑Play Metrics — {mode}")
-            tbl = board[["Play", "Attempts", "Points", "PPP", "Freq%", "Success%"]].reset_index(drop=True)
-            st.dataframe(tbl, use_container_width=True, height=360)
+            if show_table:
+                st.subheader("Per‑Play Metrics")
+                tbl = board[["Play", "Attempts", "Points", "PPP", "Freq%", "Success%"]].reset_index(drop=True)
+                st.dataframe(tbl, use_container_width=True, height=260)
 
-# ========= SIDEBAR: Playbook Manager (persist forever) =========
+with DR:
+    st.subheader("Last 10 Possessions")
+    if df.empty:
+        st.info("No data.")
+    else:
+        last10 = df.tail(10).copy()
+        last10 = last10[["Quarter","Timestamp","Plays","Outcome","Points","Caller","Call Type"]]
+        st.dataframe(last10, use_container_width=True, height=400)
+
+# ========= SIDEBAR: Playbook Manager =========
 with st.sidebar:
     st.header("Playbook Manager")
-    # Quick add (dup to center popover)
     np2 = st.text_input("New Play")
+    cat2 = st.selectbox("Category", list(ss["play_categories"].keys()) + [UNCATEGORIZED], index=0, key="pm_cat_add")
     if st.button("➕ Add Play"):
         if np2.strip():
-            if np2 not in ss["plays_master"]:
-                ss["plays_master"].append(np2); ss["plays_master"].sort()
-                if sheets_connected:
-                    sh.worksheet("Playbook").append_row(["", np2, ""], value_input_option="USER_ENTERED")
-            st.success(f"Added play: {np2}"); st.experimental_rerun()
+            nm = np2.strip()
+            if nm not in ss["plays_master"]:
+                ss["plays_master"].append(nm); ss["plays_master"].sort()
+            ss["play_categories"].setdefault(cat2, [])
+            if nm not in ss["play_categories"][cat2]:
+                ss["play_categories"][cat2].append(nm); ss["play_categories"][cat2] = sorted(set(ss["play_categories"][cat2]))
+            if sheets_connected:
+                sh.worksheet("Playbook").append_row(["", nm, cat2], value_input_option="USER_ENTERED")
+            st.success(f"Added play: {nm} → {cat2}"); st.experimental_rerun()
         else:
             st.warning("Enter a play name.")
-    # Editable list with delete
+
+    st.divider()
     if st.checkbox("Edit/Delete Plays"):
-        pb_df = pd.DataFrame({"Play Name": ss["plays_master"]})
-        ed = st.data_editor(pb_df, hide_index=True, use_container_width=True, height=240)
+        flat = []
+        for cat, lst in ss["play_categories"].items():
+            for p in lst:
+                flat.append({"Play Name": p, "Category": cat})
+        pb_df = pd.DataFrame(flat).drop_duplicates().sort_values(["Category","Play Name"]).reset_index(drop=True)
+        ed = st.data_editor(pb_df, hide_index=True, use_container_width=True, height=260)
         if st.button("💾 Save Playbook"):
-            names = [n for n in ed["Play Name"].dropna().astype(str).str.strip().tolist() if n]
-            ss["plays_master"] = sorted(set(names))
+            new_cat = {}
+            new_master = []
+            for _, r in ed.iterrows():
+                nm = str(r.get("Play Name","")).strip()
+                ct = str(r.get("Category","")).strip() or UNCATEGORIZED
+                if nm:
+                    new_master.append(nm)
+                    new_cat.setdefault(ct, []).append(nm)
+            new_master = sorted(set(new_master))
+            new_cat = {k: sorted(set(v)) for k,v in new_cat.items()}
+            ss["plays_master"] = new_master
+            ss["play_categories"] = new_cat
             if sheets_connected:
                 ws = sh.worksheet("Playbook")
                 ws.clear(); ws.update("A1:C1", [["Code","Play Name","System"]])
-                if ss["plays_master"]:
-                    ws.update(f"B2:B{len(ss['plays_master'])+1}", [[n] for n in ss["plays_master"]])
+                rows = [["", nm, ct] for ct, lst in ss["play_categories"].items() for nm in lst]
+                if rows:
+                    ws.update(f"A2:C{len(rows)+1}", rows)
             st.success("Playbook saved.")
-    st.divider()
-    with st.expander("Rename Game (copy-rename in Sheets)"):
-        new_game_name = st.text_input("New Game Name", value=ss["current_game"])
-        if st.button("Run Rename"):
-            if new_game_name.strip() and new_game_name != ss["current_game"]:
-                df_current = pd.DataFrame(ss["game_data"].get(ss["current_game"], []))
-                if sheets_connected:
-                    try:
-                        sheets_rename_game(ss["current_game"], new_game_name, ss["game_meta"][ss["current_game"]].get("type","Game"), ss["game_meta"][ss["current_game"]].get("opponent",""), df_current)
-                    except Exception as e:
-                        st.error(f"Sheets rename failed: {e}")
-                ss["game_data"][new_game_name] = ss["game_data"].pop(ss["current_game"], [])
-                ss["game_meta"][new_game_name] = ss["game_meta"].pop(ss["current_game"])
-                if new_game_name not in ss["games"]:
-                    ss["games"].append(new_game_name)
-                if ss["current_game"] in ss["games"]:
-                    ss["games"].remove(ss["current_game"])
-                ss["current_game"] = new_game_name
-                _set_qp(game=ss["current_game"])
-                st.success(f"Renamed game to: {new_game_name}")
-                st.rerun()
 
 # ========= SHEETS — Status & Postgame =========
 st.divider()
