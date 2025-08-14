@@ -592,61 +592,93 @@ st.subheader("📊 Live Dashboard")
 if df.empty:
     st.info("No data yet for visuals.")
 else:
+    # Ensure required fields exist
     vis = df.copy()
-    vis = vis[vis["Credit Play"].notna() & (vis["Credit Play"] != "")]
-    if vis.empty:
-        st.info("No credited plays yet.")
-    else:
-        # per-play aggregates using Credit Play
-        grp = vis.groupby("Credit Play", dropna=False).agg(
-            Attempts=("Points","count"),
-            Points=("Points","sum"),
-            Successes=("Success", lambda s: (s=="Yes").sum())
-        ).reset_index().rename(columns={"Credit Play":"Play"})
-        total_poss = grp["Attempts"].sum() if len(grp)>0 else 1
-        grp["PPP"] = grp["Points"] / grp["Attempts"]
-        grp["Freq%"] = 100.0 * grp["Attempts"] / total_poss
-        grp["Success%"] = 100.0 * grp["Successes"] / grp["Attempts"]
-        grp = grp.sort_values(["PPP","Attempts"], ascending=[False,False])
+    vis["Success"] = vis["Success"].fillna("").astype(str)
 
-        # controls
-        cA, cB, cC = st.columns([1,1,1])
+    # Helper: success is already computed per row, but keep a guard
+    def _success_to_bool(s): return str(s).strip().lower() == "yes"
+
+    # ---- Build two views ----
+    # 1) CREDIT PLAY (as before)
+    cred = vis[vis["Credit Play"].notna() & (vis["Credit Play"].astype(str) != "")]
+    grp_credit = pd.DataFrame()
+    if not cred.empty:
+        grp_credit = cred.groupby("Credit Play", dropna=False).agg(
+            Attempts=("Points", "count"),
+            Points=("Points", "sum"),
+            Successes=("Success", lambda s: sum(_success_to_bool(x) for x in s))
+        ).reset_index().rename(columns={"Credit Play": "Play"})
+        total_poss_credit = len(cred)
+        grp_credit["PPP"] = grp_credit["Points"] / grp_credit["Attempts"]
+        grp_credit["Freq%"] = 100.0 * grp_credit["Attempts"] / max(total_poss_credit, 1)
+        grp_credit["Success%"] = 100.0 * grp_credit["Successes"] / grp_credit["Attempts"]
+
+    # 2) ALL TAGGED PLAYS:
+    # explode "Plays" into individual play names; each possession contributes to each tagged play
+    alltag = vis[vis["Plays"].notna() & (vis["Plays"].astype(str) != "")]
+    grp_all = pd.DataFrame()
+    if not alltag.empty:
+        # split by pipe and strip
+        tmp = alltag.copy()
+        tmp["PlaysList"] = tmp["Plays"].astype(str).str.split("|")
+        # strip spaces
+        tmp["PlaysList"] = tmp["PlaysList"].apply(lambda lst: [p.strip() for p in lst if p.strip()])
+        exploded = tmp.explode("PlaysList").rename(columns={"PlaysList": "Play"})
+        # Aggregate per play (each row is a possession for that play)
+        grp_all = exploded.groupby("Play", dropna=False).agg(
+            Attempts=("Points", "count"),
+            Points=("Points", "sum"),
+            Successes=("Success", lambda s: sum(_success_to_bool(x) for x in s))
+        ).reset_index()
+        total_poss_all = len(vis)  # denominator = total possessions (not total exploded rows)
+        grp_all["PPP"] = grp_all["Points"] / grp_all["Attempts"]
+        grp_all["Freq%"] = 100.0 * grp_all["Attempts"] / max(total_poss_all, 1)
+        grp_all["Success%"] = 100.0 * grp_all["Successes"] / grp_all["Attempts"]
+
+    # ---- UI toggle: which model to visualize ----
+    mode = st.radio("Metric basis", ["All Tagged Plays", "Credit Play"], horizontal=True, index=0)
+    grp = grp_all if mode == "All Tagged Plays" else grp_credit
+
+    if grp.empty:
+        st.info("No data to display for the selected mode.")
+    else:
+        grp = grp.sort_values(["PPP", "Attempts"], ascending=[False, False])
+
+        cA, cB, cC = st.columns([1, 1, 1])
         with cA: min_attempts = st.slider("Min Attempts", 1, 15, 3)
         with cB: topN = st.slider("Top N", 5, 20, 10)
         with cC: show_table = st.toggle("Show Table", value=True)
 
         board = grp[grp["Attempts"] >= min_attempts].head(topN)
 
-        # Chart: bar by PPP with labels of Freq% and Success%
         chart_ppp = (
             alt.Chart(board)
             .mark_bar()
             .encode(
                 x=alt.X("PPP:Q"),
                 y=alt.Y("Play:N", sort="-x"),
-                tooltip=["Play","Attempts","PPP","Freq%","Success%"]
+                tooltip=["Play", "Attempts", "PPP", "Freq%", "Success%"]
             )
-            .properties(height=320, title="PPP by Play (filtered)")
+            .properties(height=320, title=f"PPP by Play — {mode}")
         )
         st.altair_chart(chart_ppp, use_container_width=True)
 
-        # Secondary chart: Frequency % (stacked not needed—single series)
         chart_freq = (
             alt.Chart(board)
             .mark_bar()
             .encode(
                 x=alt.X("Freq%:Q", title="Frequency % of All Possessions"),
                 y=alt.Y("Play:N", sort="-x"),
-                tooltip=["Play","Freq%","Attempts"]
+                tooltip=["Play", "Freq%", "Attempts"]
             )
-            .properties(height=280, title="Frequency % by Play")
+            .properties(height=280, title=f"Frequency % by Play — {mode}")
         )
         st.altair_chart(chart_freq, use_container_width=True)
 
-        # Success % table (optional)
         if show_table:
-            st.subheader("Per‑Play Metrics")
-            tbl = board[["Play","Attempts","Points","PPP","Freq%","Success%"]].reset_index(drop=True)
+            st.subheader(f"Per‑Play Metrics — {mode}")
+            tbl = board[["Play", "Attempts", "Points", "PPP", "Freq%", "Success%"]].reset_index(drop=True)
             st.dataframe(tbl, use_container_width=True, height=360)
 
 # ========= SIDEBAR: Playbook Manager (persist forever) =========
