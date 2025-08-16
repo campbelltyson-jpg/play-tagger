@@ -677,4 +677,5 @@ with DL:
         def _success_to_bool(s): return str(s).strip().lower() == "yes"
 
         # CREDIT PLAY basis
-        cred = vis[vis
+    cred = json.loads(st.secrets["gcp_service_account"], strict=False)
+
