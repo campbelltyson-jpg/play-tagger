@@ -1,4 +1,14 @@
-# app.py — Play Tagger v8.0.4 (safe Sheets, iPad chips, persistence)
+# app.py — Play Tagger v8.0.5
+# - Safe Google Sheets loader (won’t crash if secrets missing)
+# - Logo: local file or LOGO_URL fallback
+# - Always-available "New Game" (header popover + sidebar expander + inline row toggle)
+# - Chips: grey with black text; red when selected
+# - iPad/iPhone: smaller clock chips
+# - URL ?game= persistence + rehydrate from Sheets
+# - +Add Play (persists to Playbook sheet)
+# - Quick Bar with Confirm, Next Quarter, Undo
+# - Live dashboard: PPP, Frequency%, Success% (All Tagged or Credit Play)
+
 import streamlit as st
 import pandas as pd
 import altair as alt
@@ -6,8 +16,8 @@ import json
 from datetime import datetime
 
 # ===== App config =====
-st.set_page_config(page_title="Play Tagger v8.0.4", layout="wide")
-AUTO_DEC_SECONDS = 8  # auto-decrement after Confirm
+st.set_page_config(page_title="Play Tagger v8.0.5", layout="wide")
+AUTO_DEC_SECONDS = 8  # seconds to auto-decrement after Confirm
 
 # ---------- Helpers: query params ----------
 def _get_qp():
@@ -22,13 +32,34 @@ def _set_qp(**kwargs):
     except Exception:
         st.experimental_set_query_params(**kwargs)
 
-# ---------- Optional logo ----------
+# ---------- Logo: local file OR LOGO_URL secret ----------
 def logo_image_bytes():
-    try:
-        with open("Transition Defense.png", "rb") as f:
-            return f.read()
-    except Exception:
-        return None
+    """
+    Returns bytes for a local logo file if present, otherwise tries LOGO_URL secret.
+    """
+    import os
+    # 1) Try local files at repo root
+    for candidate in [
+        "Transition Defense.png", "transition_defense.png",
+        "logo.png", "logo.jpg", "logo.jpeg", "logo.webp"
+    ]:
+        if os.path.exists(candidate):
+            try:
+                with open(candidate, "rb") as f:
+                    return f.read()
+            except Exception:
+                pass
+    # 2) Try remote URL in secrets
+    url = st.secrets.get("LOGO_URL")
+    if url:
+        try:
+            import requests
+            r = requests.get(url, timeout=6)
+            if r.ok:
+                return r.content
+        except Exception:
+            pass
+    return None
 
 # ===== Google Sheets (optional & safe) =====
 gc = None
@@ -53,7 +84,7 @@ def connect_sheets():
         creds = Credentials.from_service_account_info(creds_info, scopes=scopes)
         _gc = gspread.authorize(creds)
 
-        # 2) open sheet
+        # 2) open sheet by URL or ID
         url = st.secrets.get("private_gsheets_url")
         sid = st.secrets.get("SHEET_ID")
         if url:
@@ -111,8 +142,7 @@ def sheets_overwrite_game(game_name:str, df:pd.DataFrame):
     ws = get_or_create_game_ws(game_name)
     ws.resize(rows=1)
     if df.empty:
-        ws.update("A1:M1", [GAME_HEADERS])
-        return
+        ws.update("A1:M1", [GAME_HEADERS]); return
     for c in GAME_HEADERS:
         if c not in df.columns: df[c] = ""
     df = df[GAME_HEADERS].fillna("")
@@ -144,7 +174,6 @@ def read_game_from_sheets(game_name:str, _bust:int=0):
 CALL_TYPES_MASTER = ["Early Offense","Half Court","BLOB","SLOB","Zone"]
 CALLERS = ["Coach","Player"]
 QUARTERS = ["Q1","Q2","Q3","Q4","OT"]
-
 SC_OUTCOMES = ["Made 2","Missed 2","Made 3","Missed 3","Foul","Turnover","Reset/Other"]
 
 def points_from_outcome(o:str) -> int:
@@ -152,7 +181,7 @@ def points_from_outcome(o:str) -> int:
 def is_success(outcome:str) -> bool:
     return outcome in ["Made 2","Made 3","Foul (Made 1/2)","Foul (Made 2/2)"]
 
-# ===== Your categories =====
+# ===== Play categories (your list) =====
 USER_PLAY_CATEGORIES = {
     "2 Man Game": ["7","Shake","Rub","Roll","Flat","Pitch","15 Step","14 Step","51 Step"],
     "3 Man Game": ["77","Delay","Pistol","Away","Slice","Elbow","Stack","Gets"],
@@ -237,7 +266,191 @@ div[data-testid="stCheckbox"]:has(input:checked) label{
 if ss["compact_mode"]:
     st.markdown('<style>.block-container{padding-top:10px !important; padding-bottom:56px !important;}</style>', unsafe_allow_html=True)
 
-# === At this point the file continues with layout (Clock, Play tagging, Outcomes, Confirm, Undo, Dashboard etc).
+# ===== Init Sheets + baseline tabs + hydrate Playbook/Games =====
+if sheets_connected:
+    ensure_core_tabs()
+    try:
+        pb = pd.DataFrame(sh.worksheet("Playbook").get_all_records())
+        if not pb.empty and "Play Name" in pb:
+            names = pb["Play Name"].dropna().astype(str).str.strip().tolist()
+            if names:
+                ss["plays_master"] = sorted(set(ss["plays_master"]) | set(names))
+        if not pb.empty and "System" in pb:
+            cat = {}
+            for _, r in pb.iterrows():
+                nm = str(r.get("Play Name","")).strip()
+                sys = str(r.get("System","")).strip() or UNCATEGORIZED
+                if nm: cat.setdefault(sys, []).append(nm)
+            if cat:
+                ss["play_categories"] = {k: sorted(set(v)) for k,v in cat.items()}
+    except Exception:
+        pass
+    try:
+        games_df = sheets_list_games_df()
+        if not games_df.empty:
+            for r in games_df.to_dict("records"):
+                name = r.get("Game Name")
+                if name and name not in ss["games"]:
+                    ss["games"].append(name)
+                if name:
+                    meta = ss["game_meta"].setdefault(name, {})
+                    if r.get("Type"): meta["type"] = r["Type"]
+                    if r.get("Opponent"): meta["opponent"] = r["Opponent"]
+            ss["games"] = sorted(set(ss["games"]))
+    except Exception:
+        pass
+
+# ===== Header / Logo =====
+_, cimg, _ = st.columns([1,3,1])
+with cimg:
+    _logo = logo_image_bytes()
+    if _logo: st.image(_logo, use_column_width=True)
+
+# ===== Utilities =====
+def next_quarter(q:str) -> str:
+    try: i = QUARTERS.index(q)
+    except ValueError: i = 0
+    return QUARTERS[min(i+1, len(QUARTERS)-1)]
+
+def join_pipe(items): return " | ".join(items) if items else ""
+
+# ===== Determine current game (URL param -> latest fallback) =====
+qp = _get_qp()
+qp_game = None
+if "game" in qp:
+    v = qp["game"]; qp_game = v[0] if isinstance(v, list) else v
+
+def most_recent_game_name():
+    if not sheets_connected: return None
+    try:
+        gdf = sheets_list_games_df()
+        if gdf.empty: return None
+        gdf["Created At"] = pd.to_datetime(gdf["Created At"], errors="coerce")
+        gdf = gdf.sort_values("Created At")
+        return gdf["Game Name"].iloc[-1] if not gdf.empty else None
+    except Exception:
+        return None
+
+if qp_game and qp_game in ss["games"]:
+    ss["current_game"] = qp_game
+elif sheets_connected:
+    mr = most_recent_game_name()
+    if mr: ss["current_game"] = mr
+else:
+    if ss["current_game"] not in ss["games"]:
+        ss["current_game"] = ss["games"][0]
+
+_set_qp(game=ss["current_game"])
+
+# ALWAYS rehydrate on game selection (strong persistence)
+if sheets_connected:
+    try:
+        df_h = read_game_from_sheets(ss["current_game"])
+        if not df_h.empty:
+            ss["game_data"][ss["current_game"]] = df_h.to_dict("records")
+    except Exception:
+        pass
+
+# ===== Sticky top controls =====
+st.markdown('<div class="top-sticky">', unsafe_allow_html=True)
+gc1, gc2, gc3, gc4, gc5, gc6 = st.columns([2,1,2,1,1,1])
+with gc1:
+    current_game = st.selectbox("Current Game", options=ss["games"], index=ss["games"].index(ss["current_game"]) if ss["current_game"] in ss["games"] else 0)
+    if current_game != ss["current_game"]:
+        ss["current_game"] = current_game
+        _set_qp(game=ss["current_game"])
+        if sheets_connected:
+            df_h = read_game_from_sheets(ss["current_game"])
+            ss["game_data"][ss["current_game"]] = df_h.to_dict("records") if not df_h.empty else []
+        ss["game_meta"].setdefault(ss["current_game"], {"quarter":"Q1","opponent":"","type":"Game"})
+with gc2:
+    meta = ss["game_meta"].setdefault(ss["current_game"], {"quarter":"Q1","opponent":"","type":"Game"})
+    meta["quarter"] = st.selectbox("Quarter", QUARTERS, index=QUARTERS.index(meta.get("quarter","Q1")))
+with gc3:
+    meta["opponent"] = st.text_input("Opponent", value=meta.get("opponent",""))
+with gc4:
+    meta["type"] = st.selectbox("Type", ["Game","Scrimmage","Scout"], index=["Game","Scrimmage","Scout"].index(meta.get("type","Game")))
+with gc5:
+    if st.button("Next Quarter"):
+        meta["quarter"] = next_quarter(meta.get("quarter","Q1"))
+        st.toast(f"Quarter → {meta['quarter']}", icon="⏭️")
+with gc6:
+    ss["compact_mode"] = st.toggle("Compact", value=ss["compact_mode"], help="Tight spacing + bottom bar room")
+
+# --- Quick New Game popover (always available) ---
+try:
+    with st.popover("➕ New Game", use_container_width=False):
+        _ng1, _ng2, _ng3 = st.columns([1.4, 1, 1.2])
+        with _ng1:
+            new_name_pop = st.text_input("Name", key="new_game_name_pop")
+        with _ng2:
+            new_type_pop = st.selectbox("Type", ["Game","Scrimmage","Scout"], key="new_game_type_pop")
+        with _ng3:
+            new_opp_pop = st.text_input("Opponent", key="new_game_opp_pop")
+        if st.button("Create", key="new_game_create_pop"):
+            if new_name_pop.strip():
+                if new_name_pop not in ss["games"]:
+                    ss["games"].append(new_name_pop)
+                ss["game_meta"][new_name_pop] = {"quarter":"Q1","opponent":new_opp_pop,"type":new_type_pop}
+                ss["game_data"].setdefault(new_name_pop, [])
+                if sheets_connected:
+                    sheets_add_game(new_name_pop, new_type_pop, new_opp_pop)
+                ss["current_game"] = new_name_pop
+                ss["hide_create_row"] = True  # hide inline row after creation
+                _set_qp(game=new_name_pop)
+                st.success(f"Created game: {new_name_pop}")
+                st.rerun()
+            else:
+                st.warning("Enter a game name first.")
+except Exception:
+    pass
+
+st.markdown('</div>', unsafe_allow_html=True)  # end sticky header
+
+# Toggle to reveal the big create row again if it was hidden
+if ss.get("hide_create_row", False):
+    if st.toggle("Show inline Create Game row", value=False, help="Reopen the large 'Create New Game' row"):
+        ss["hide_create_row"] = False
+
+# quick create row (first-time or if toggled back on)
+if not ss["hide_create_row"]:
+    cg1, cg2, cg3, cg4 = st.columns([2,1.2,1.8,0.8])
+    with cg1: new_name = st.text_input("Create New Game — Name")
+    with cg2: new_type = st.selectbox("Type", ["Game","Scrimmage","Scout"], key="new_type_inline")
+    with cg3: new_opp  = st.text_input("Opponent", key="new_opp_inline")
+    with cg4:
+        if st.button("Create"):
+            if new_name.strip():
+                if new_name not in ss["games"]: ss["games"].append(new_name)
+                ss["game_meta"][new_name] = {"quarter":"Q1","opponent":new_opp,"type":new_type}
+                ss["game_data"].setdefault(new_name, [])
+                if sheets_connected: sheets_add_game(new_name, new_type, new_opp)
+                ss["current_game"] = new_name; ss["hide_create_row"] = True; _set_qp(game=new_name)
+                st.success(f"Created game: {new_name}"); st.rerun()
+            else:
+                st.warning("Enter a game name first.")
+
+# ===== Sidebar: extra Create/Load fallback =====
+with st.sidebar.expander("Create / Load Game", expanded=False):
+    new_name_sb = st.text_input("Game Name", key="new_game_name_sb")
+    new_type_sb = st.selectbox("Type", ["Game","Scrimmage","Scout"], key="new_game_type_sb")
+    new_opp_sb  = st.text_input("Opponent", key="new_game_opp_sb")
+    if st.button("Start New Game", key="start_game_sb"):
+        if new_name_sb.strip():
+            if new_name_sb not in ss["games"]:
+                ss["games"].append(new_name_sb)
+            ss["game_meta"][new_name_sb] = {"quarter":"Q1","opponent":new_opp_sb,"type":new_type_sb}
+            ss["game_data"].setdefault(new_name_sb, [])
+            if sheets_connected:
+                sheets_add_game(new_name_sb, new_type_sb, new_opp_sb)
+            ss["current_game"] = new_name_sb
+            ss["hide_create_row"] = True
+            _set_qp(game=new_name_sb)
+            st.success(f"Created game: {new_name_sb}")
+            st.rerun()
+        else:
+            st.warning("Enter a game name.")
+
 # ===== 3-panel layout =====
 L, C, R = st.columns([1.2, 2.1, 1.7])
 
@@ -311,7 +524,7 @@ with C:
         show_list = [p for p in plays if (search.lower() in p.lower())] if search else plays
         if not show_list:
             continue
-        expanded_default = cat_name in ("Pace & Space", "2 Man Game")
+        expanded_default = cat_name in ("Pace & Space", "2 Man Game")  # open by default
         with st.expander(f"{cat_name} ({len(show_list)})", expanded=expanded_default):
             subset = chip_check_group("", show_list, key=f"ms_plays_cat_{cat_name}", cols=4, default_selected=[], small=True)
             selected_all.update(subset)
@@ -327,8 +540,7 @@ with C:
                 if np.strip():
                     nm = np.strip()
                     if nm not in ss["plays_master"]:
-                        ss["plays_master"].append(nm)
-                        ss["plays_master"].sort()
+                        ss["plays_master"].append(nm); ss["plays_master"].sort()
                     ss["play_categories"].setdefault(cat_choice, [])
                     if nm not in ss["play_categories"][cat_choice]:
                         ss["play_categories"][cat_choice].append(nm)
@@ -350,8 +562,7 @@ with C:
                 if np.strip():
                     nm = np.strip()
                     if nm not in ss["plays_master"]:
-                        ss["plays_master"].append(nm)
-                        ss["plays_master"].sort()
+                        ss["plays_master"].append(nm); ss["plays_master"].sort()
                     ss["play_categories"].setdefault(cat_choice, [])
                     if nm not in ss["play_categories"][cat_choice]:
                         ss["play_categories"][cat_choice].append(nm)
@@ -379,10 +590,8 @@ with R:
         sel_call_types = ["Half Court"]
 
 # ===== Build & Push Row =====
-def join_pipe(items):
-    return " | ".join(items) if items else ""
-
 def build_row_from_ui(outcome_text: str):
+    def join_pipe(items): return " | ".join(items) if items else ""
     plays_str = join_pipe(sel_plays_sorted)
     call_types_str = join_pipe(sel_call_types or ["Half Court"])
     sc_str = join_pipe(sel_sc_outcomes) if second_chance == "Yes" else ""
@@ -421,8 +630,7 @@ def push_row(r: dict):
             st.error(f"Sheets append failed: {e}")
 
 def auto_decrement_clock():
-    m = ss["game_clock_min"]
-    s = int(ss["game_clock_sec"])
+    m = ss["game_clock_min"]; s = int(ss["game_clock_sec"])
     total = max(0, m*60 + s - AUTO_DEC_SECONDS)
     ss["game_clock_min"], ss["game_clock_sec"] = total//60, f"{total%60:02d}"
 
@@ -444,7 +652,6 @@ with qb4:
     if st.button("Timeout"): ss["pending_action"] = "Timeout"
     if st.button("DB Foul"): ss["pending_action"] = "Dead Ball Foul"
     if st.button("↩︎ Undo Last"):
-        # also sync Sheets if connected
         rows = ss["game_data"].get(ss["current_game"], [])
         if rows:
             rows.pop()
@@ -466,8 +673,8 @@ if ss.get("pending_action"):
         st.write(
             f"Pending: **{ss['pending_action']}** | Clock **{ss['game_clock_min']}:{ss['game_clock_sec']}** | Q **{ss['game_meta'][ss['current_game']].get('quarter','Q1')}** "
             f"| Plays: **{', '.join(sel_plays_sorted) or '(none)'}** → Credit **{ss.get('credit_play') or '(pick)'}** "
-            f"| Call Type(s): **{join_pipe(sel_call_types)}** | 2nd: **{second_chance}**"
-            + (f" (**{join_pipe(sel_sc_outcomes)}**)" if (second_chance=='Yes' and sel_sc_outcomes) else "")
+            f"| Call Type(s): **{ ' | '.join(sel_call_types) }** | 2nd: **{second_chance}**"
+            + (f" (**{' | '.join(sel_sc_outcomes)}**)" if (second_chance=='Yes' and sel_sc_outcomes) else "")
         )
         c1, c2 = st.columns(2)
         with c1:
@@ -501,8 +708,7 @@ with DL:
         vis = df.copy()
         vis["Success"] = vis["Success"].fillna("").astype(str)
 
-        def _success_to_bool(s):
-            return str(s).strip().lower() == "yes"
+        def _success_to_bool(s): return str(s).strip().lower() == "yes"
 
         # CREDIT PLAY basis
         cred = vis[(vis["Credit Play"].notna()) & (vis["Credit Play"].astype(str) != "")]
@@ -518,19 +724,19 @@ with DL:
             grp_credit["Freq%"] = 100.0 * grp_credit["Attempts"] / max(total_poss_credit, 1)
             grp_credit["Success%"] = 100.0 * grp_credit["Successes"] / grp_credit["Attempts"]
 
-        # ALL TAGGED PLAYS basis (explode)
+        # ALL TAGGED PLAYS basis (explode by plays in possession)
         grp_all = pd.DataFrame()
         if vis["Plays"].notna().any():
             tmp = vis.copy()
             tmp["PlaysList"] = tmp["Plays"].astype(str).str.split("|")
             tmp["PlaysList"] = tmp["PlaysList"].apply(lambda lst: [p.strip() for p in lst if p.strip()])
-            exploded = tmp.explode("PlaysList").rename(columns={"PlaysList": "Play"})
+            exploded = tmp.explode("PlaysList").rename(columns={"PlaysList":"Play"})
             grp_all = exploded.groupby("Play", dropna=False).agg(
                 Attempts=("Points", "count"),
                 Points=("Points", "sum"),
                 Successes=("Success", lambda s: sum(_success_to_bool(x) for x in s))
             ).reset_index()
-            total_poss_all = len(vis)  # denominator = total possessions
+            total_poss_all = len(vis)  # denom = total possessions
             grp_all["PPP"] = grp_all["Points"] / grp_all["Attempts"]
             grp_all["Freq%"] = 100.0 * grp_all["Attempts"] / max(total_poss_all, 1)
             grp_all["Success%"] = 100.0 * grp_all["Successes"] / grp_all["Attempts"]
@@ -599,8 +805,7 @@ with st.sidebar:
         if np2.strip():
             nm = np2.strip()
             if nm not in ss["plays_master"]:
-                ss["plays_master"].append(nm)
-                ss["plays_master"].sort()
+                ss["plays_master"].append(nm); ss["plays_master"].sort()
             ss["play_categories"].setdefault(cat2, [])
             if nm not in ss["play_categories"][cat2]:
                 ss["play_categories"][cat2].append(nm)
