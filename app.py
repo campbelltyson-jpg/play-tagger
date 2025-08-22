@@ -3,8 +3,13 @@ import pandas as pd
 import numpy as np
 import altair as alt
 import streamlit.components.v1 as components
+import gspread
 
 # --- CONSTANTS & CONFIGURATION ---
+# The URL for the publicly shared Google Sheets spreadsheet
+SHEETS_URL = st.secrets["SHEETS_URL"]
+
+# Master lists for UI dropdowns/multiselects
 CALLERS = ["John", "Paul", "George", "Ringo", "Other"]
 QUARTERS = ["Q1", "Q2", "Q3", "Q4", "OT", "2OT", "3OT", "4OT"]
 SC_OUTCOMES = [
@@ -17,6 +22,15 @@ GAME_HEADERS = [
     "Timestamp", "Plays", "Credit Play", "Call Type", "Caller", "Outcome", "Points",
     "2nd Chance?", "2nd Chance Outcome", "Quarter", "Opponent", "Game Type", "Success"
 ]
+
+# ===== Play categories (your list) ===== 
+USER_PLAY_CATEGORIES = { 
+    "2 Man Game": ["7","Shake","Rub","Roll","Flat","Pitch","15 Step","14 Step","51 Step"], 
+    "3 Man Game": ["77","Delay","Pistol","Away","Slice","Elbow","Stack","Gets"], 
+    "Pace & Space": ["Transition","Flow","Pistol","Zoom","Random","Broken Play","Punch"], 
+    "Specials": ["Open Sets","ATO","College","Mustang","1","Zip Quick","High","X"], 
+} 
+UNCATEGORIZED = "Uncategorized" 
 
 # --- HELPER FUNCTIONS ---
 def is_success(outcome: str):
@@ -38,6 +52,87 @@ def get_ss(key, default):
     if key not in st.session_state:
         st.session_state[key] = default
     return st.session_state[key]
+    
+# ===== Chip helper ===== 
+def chip_check_group(label, options, key, cols=4, default_selected=None, small=False): 
+    if label: st.markdown(f"**{label}**") 
+    if default_selected is None: default_selected = [] 
+    st.session_state.setdefault(key, set(default_selected)) 
+    selected = set(st.session_state[key]) 
+    col_list = st.columns(cols) 
+    pad = "6px 10px" if small else "8px 12px" 
+    st.markdown(f"<style>div[data-key^='{key}__'] label{{padding:{pad} !important;}}</style>", unsafe_allow_html=True) 
+    for i, opt in enumerate(options): 
+        with col_list[i % cols]: 
+            checked = st.checkbox(opt, value=(opt in selected), key=f"{key}__{opt}") 
+            if checked: selected.add(opt) 
+            else: selected.discard(opt) 
+    st.session_state[key] = selected 
+    return sorted(selected)
+
+# --- GOOGLE SHEETS INTERACTION ---
+@st.cache_resource(ttl=3600)
+def get_gspread_client():
+    """Initializes and returns a gspread client."""
+    try:
+        # Load credentials from st.secrets
+        gs_client = gspread.service_account_from_dict(st.secrets["gcp_service_account"])
+        return gs_client
+    except Exception as e:
+        st.error(f"Failed to connect to Google Sheets: {e}")
+        return None
+
+gs_client = get_gspread_client()
+sheets_connected = gs_client is not None
+
+def sheets_append_play(game_name, row_data):
+    """Appends a new row to a specific worksheet."""
+    try:
+        sh = gs_client.open_by_url(SHEETS_URL)
+        worksheet = sh.worksheet(game_name)
+        worksheet.append_row(row_data)
+        return True
+    except gspread.exceptions.WorksheetNotFound:
+        st.error(f"Worksheet '{game_name}' not found. Please create it manually.")
+        return False
+    except Exception as e:
+        st.error(f"Error appending row to Google Sheets: {e}")
+        return False
+
+def sheets_overwrite_game(game_name, df: pd.DataFrame):
+    """Overwrites an entire game's worksheet with a new DataFrame."""
+    try:
+        sh = gs_client.open_by_url(SHEETS_URL)
+        worksheet = sh.worksheet(game_name)
+        worksheet.clear()
+        worksheet.append_row(list(df.columns))
+        worksheet.append_rows(df.astype(str).values.tolist())
+        return True
+    except gspread.exceptions.WorksheetNotFound:
+        st.error(f"Worksheet '{game_name}' not found. Please create it manually.")
+        return False
+    except Exception as e:
+        st.error(f"Error overwriting sheet: {e}")
+        return False
+
+@st.cache_data(ttl=300)
+def read_game_from_sheets(game_name):
+    """Reads a specific worksheet into a DataFrame."""
+    if not sheets_connected:
+        return pd.DataFrame(columns=GAME_HEADERS)
+    try:
+        sh = gs_client.open_by_url(SHEETS_URL)
+        worksheet = sh.worksheet(game_name)
+        data = worksheet.get_all_records()
+        df = pd.DataFrame(data)
+        if not df.empty:
+            df['Points'] = pd.to_numeric(df['Points'], errors='coerce').fillna(0).astype(int)
+        return df
+    except gspread.exceptions.WorksheetNotFound:
+        return pd.DataFrame(columns=GAME_HEADERS)
+    except Exception as e:
+        st.error(f"Error reading from Google Sheets: {e}")
+        return pd.DataFrame(columns=GAME_HEADERS)
 
 # --- SESSION STATE MANAGEMENT ---
 ss = st.session_state
@@ -69,56 +164,96 @@ st.markdown("""
 # --- SIDEBAR ---
 with st.sidebar:
     st.title("Settings")
-    
+
+    if sheets_connected:
+        try:
+            sh = gs_client.open_by_url(SHEETS_URL)
+            worksheets = [ws.title for ws in sh.worksheets()]
+            existing_games = [ws for ws in worksheets if ws != "master_config"]
+        except Exception:
+            existing_games = []
+    else:
+        existing_games = []
+
     st.subheader("Load/Create Game")
-    
-    new_game_name = st.text_input("Start New Game Name:")
+
+    # Load game from existing sheets
+    selected_game = st.selectbox("Select Existing Game:", existing_games, index=None)
+
+    # New game creation input
+    new_game_name = st.text_input("Or Start New Game Name:")
     new_game_opp = st.text_input("New Game Opponent:", "")
     new_game_type = st.selectbox("New Game Type:", ["Game", "Scrimmage", "Scout"])
 
-    if st.button("Start New Game"):
-        if new_game_name:
+    if st.button("Load/Create Game"):
+        if selected_game:
+            ss["current_game"] = selected_game
+            ss["game_meta"][selected_game] = {"opponent": "N/A", "type": "Game"} # Dummy metadata for existing games
+            st.success(f"Game '{selected_game}' loaded.")
+        elif new_game_name:
+            if sheets_connected:
+                # Check if worksheet already exists
+                if new_game_name not in existing_games:
+                    try:
+                        sh = gs_client.open_by_url(SHEETS_URL)
+                        worksheet = sh.add_worksheet(title=new_game_name, rows="1", cols="1")
+                        worksheet.append_row(GAME_HEADERS)
+                        st.success(f"New worksheet '{new_game_name}' created!")
+                    except Exception as e:
+                        st.error(f"Failed to create new sheet: {e}")
+                        ss["current_game"] = None
+                        st.stop()
+                else:
+                    st.warning(f"Worksheet '{new_game_name}' already exists. Loading it instead.")
             ss["current_game"] = new_game_name
-            ss["game_data"][new_game_name] = []
-            ss["game_meta"][new_game_name] = {"opponent": new_game_opp, "type": new_game_type, "quarter": "Q1"}
-            ss["plays_master"] = set()
-            st.success(f"Game '{new_game_name}' started.")
+            ss["game_meta"][new_game_name] = {"opponent": new_game_opp, "type": new_game_type}
+            st.success(f"Game '{new_game_name}' loaded.")
         else:
-            st.warning("Please enter a new game name.")
+            st.warning("Please select an existing game or enter a new game name.")
             st.stop()
-            
-    if st.button("Clear Session Data"):
-        st.session_state.clear()
-        st.success("All session data has been cleared. Refresh the page to start a new session.")
-    
+
     if ss["current_game"]:
         st.subheader("Game Clock")
-        
+
         # Quarter selection
         current_quarter = ss["game_meta"][ss["current_game"]].get("quarter", "Q1")
         ss["game_meta"][ss["current_game"]]["quarter"] = st.selectbox(
             "Quarter:", QUARTERS, index=QUARTERS.index(current_quarter)
         )
-        
+
         # Clock control
         c1, c2 = st.columns([1,1])
         with c1:
             ss["game_clock_min"] = st.number_input("Minutes:", min_value=0, max_value=60, value=ss["game_clock_min"])
         with c2:
             ss["game_clock_sec"] = st.number_input("Seconds:", min_value=0, max_value=59, value=int(ss["game_clock_sec"]), format="%02d")
-        
+
         if st.button("Reset Clock"):
             ss["game_clock_min"], ss["game_clock_sec"] = 24, "00"
+
+        st.subheader("Play Tags")
+        st.caption("Select one or more plays for this possession.")
+
+        # Display play categories as check-box "chips"
+        selected_chips = set()
+        for category, plays in USER_PLAY_CATEGORIES.items():
+            selected_chips.update(chip_check_group(category, plays, f"chips_{category}"))
+        
+        # Uncategorized plays
+        st.markdown("---")
+        df_plays = read_game_from_sheets(ss["current_game"])
+        if not df_plays.empty and "Plays" in df_plays.columns:
+            all_plays = set(df_plays["Plays"].str.split(" | ").explode().str.strip().dropna().unique())
+            all_predefined_plays = set(p for sublist in USER_PLAY_CATEGORIES.values() for p in sublist)
+            uncategorized_plays = sorted(list(all_plays - all_predefined_plays))
+            ss["plays_master"] = all_plays
             
-        st.subheader("Tagging")
+            if uncategorized_plays:
+                uncategorized_chips = chip_check_group(UNCATEGORIZED, uncategorized_plays, "chips_uncategorized", cols=3, small=True)
+                selected_chips.update(uncategorized_chips)
         
-        ss["ms_plays"] = st.multiselect(
-            "Tag Plays:",
-            options=sorted(list(ss["plays_master"])),
-            default=list(ss["ms_plays"])
-        )
+        # Manually add a new play tag
         new_play = st.text_input("New Play Tag:", "").strip()
-        
         if new_play and st.button("Add Play Tag"):
             if new_play not in ss["plays_master"]:
                 ss["plays_master"].add(new_play)
@@ -126,24 +261,29 @@ with st.sidebar:
                 st.experimental_rerun()
             else:
                 st.warning(f"'{new_play}' already exists.")
-        
-        # Display selected plays in sorted order
-        sel_plays_sorted = sorted(list(ss["ms_plays"]))
-        
+
+        # Update the multiselect with selected chips
+        ss["ms_plays"] = sorted(list(selected_chips))
+
         # Credit Play selection for PPP
         ss["credit_play"] = st.selectbox(
             "Credit Play (for PPP):",
-            options=[""] + sel_plays_sorted
+            options=[""] + ss["ms_plays"]
         )
 
 # --- MAIN APP ---
 if not ss["current_game"]:
-    st.info("Please start a new game in the sidebar to begin.")
+    st.info("Please select or create a game in the sidebar to begin.")
 else:
     st.title(f"🏀 Live Game: {ss['current_game']}")
-            
+
+    # Reload data from sheets on app start for rehydration
+    with st.spinner(f"Loading game data for '{ss['current_game']}'..."):
+        df_rehydrated = read_game_from_sheets(ss["current_game"])
+        ss["game_data"][ss["current_game"]] = df_rehydrated.to_dict("records")
+
     st.header("Possession Logger")
-    
+
     col1, col2, col3 = st.columns(3)
     with col1:
         caller = st.selectbox("Caller:", CALLERS)
@@ -155,18 +295,18 @@ else:
             sel_sc_outcomes = st.multiselect("2nd Chance Outcome(s):", SC_OUTCOMES)
         else:
             sel_sc_outcomes = []
-    
+
     # ===== Build & Push Row =====
     def build_row_from_ui(outcome_text: str):
         def join_pipe(items): return " | ".join(items) if items else ""
-        plays_str = join_pipe(sel_plays_sorted)
+        plays_str = join_pipe(ss["ms_plays"])
         call_types_str = join_pipe(sel_call_types or ["Half Court"])
         sc_str = join_pipe(sel_sc_outcomes) if second_chance == "Yes" else ""
         pts = points_from_outcome(outcome_text)
         return {
             "Timestamp": f"{ss['game_clock_min']}:{ss['game_clock_sec']}",
             "Plays": plays_str,
-            "Credit Play": ss.get("credit_play") or (sel_plays_sorted[0] if sel_plays_sorted else ""),
+            "Credit Play": ss.get("credit_play") or (ss["ms_plays"][0] if ss["ms_plays"] else ""),
             "Call Type": call_types_str,
             "Caller": caller,
             "Outcome": outcome_text,
@@ -178,15 +318,25 @@ else:
             "Game Type": ss["game_meta"][ss["current_game"]].get("type","Game"),
             "Success": "Yes" if is_success(outcome_text) else "No",
         }
-    
+
     def push_row(r: dict):
         ss["game_data"].setdefault(ss["current_game"], []).append(r)
-    
+        if sheets_connected:
+            try:
+                sheets_append_play(ss["current_game"], [
+                    r["Timestamp"], r["Plays"], r["Credit Play"], r["Call Type"], r["Caller"],
+                    r["Outcome"], r["Points"], r["2nd Chance?"], r["2nd Chance Outcome"],
+                    r["Quarter"], r["Opponent"], r["Game Type"], r["Success"]
+                ])
+                read_game_from_sheets.clear()
+            except Exception as e:
+                st.error(f"Sheets append failed: {e}")
+
     def auto_decrement_clock():
         m = ss["game_clock_min"]; s = int(ss["game_clock_sec"])
         total = max(0, m*60 + s - AUTO_DEC_SECONDS)
         ss["game_clock_min"], ss["game_clock_sec"] = total//60, f"{total%60:02d}"
-    
+
     # ===== Sticky Bottom Quick Bar =====
     st.markdown('<div class="bottom-sticky">', unsafe_allow_html=True)
     qb1, qb2, qb3, qb4 = st.columns(4)
@@ -209,33 +359,39 @@ else:
             if rows:
                 rows.pop()
                 ss["game_data"][ss["current_game"]] = rows
-                st.success("Undid last possession.")
+                if sheets_connected:
+                    try:
+                        sheets_overwrite_game(ss["current_game"], pd.DataFrame(rows))
+                        read_game_from_sheets.clear()
+                        st.success("Undid last possession (synced).")
+                    except Exception as e:
+                        st.error(f"Undo sync failed: {e}")
             else:
                 st.warning("No possessions to undo.")
     st.markdown('</div>', unsafe_allow_html=True)
-    
+
     # Callback function to handle form submission
     def on_confirm_callback():
-        if not sel_plays_sorted:
+        if not ss["ms_plays"]:
             st.error("Select at least one play.")
             return
         if not ss.get("credit_play"):
             st.error("Pick a Credit Play for PPP attribution.")
             return
-        
+
         row = build_row_from_ui(ss["pending_action"])
         push_row(row)
         ss["pending_action"] = None
         ss["ms_plays"] = set() # clear selection for next possession
         auto_decrement_clock()
-        st.success("Possession logged!")
-    
+        st.success("Possession logged and synced!")
+
     # Pending banner + Confirm (now using a form)
     if ss.get("pending_action"):
         with st.form("pending_form", border=True):
             st.write(
                 f"Pending: **{ss['pending_action']}** | Clock **{ss['game_clock_min']}:{ss['game_clock_sec']}** | Q **{ss['game_meta'][ss['current_game']].get('quarter','Q1')}** "
-                f"| Plays: **{', '.join(sel_plays_sorted) or '(none)'}** → Credit **{ss.get('credit_play') or '(pick)'}** "
+                f"| Plays: **{', '.join(ss['ms_plays']) or '(none)'}** → Credit **{ss.get('credit_play') or '(pick)'}** "
                 f"| Call Type(s): **{ ' | '.join(sel_call_types) }** | 2nd: **{second_chance}**"
                 + (f" (**{' | '.join(sel_sc_outcomes)}**)" if (second_chance=='Yes' and sel_sc_outcomes) else "")
             )
@@ -247,21 +403,21 @@ else:
                     ss["pending_action"] = None
                     st.info("Quick action canceled.")
                     st.rerun()
-    
+
     # ===== Live Dashboard + Recent Possessions =====
     df = pd.DataFrame(ss["game_data"].get(ss["current_game"], []))
     st.subheader("📊 Live: Play Metrics & Recent Possessions")
     DL, DR = st.columns([1.2, 1.0])
-    
+
     with DL:
         if df.empty:
             st.info("No data yet for visuals.")
         else:
             vis = df.copy()
             vis["Success"] = vis["Success"].fillna("").astype(str)
-    
+
             def _success_to_bool(s): return str(s).strip().lower() == "yes"
-    
+
             # CREDIT PLAY basis
             cred = vis[(vis["Credit Play"].notna()) & (vis["Credit Play"].astype(str) != "")]
             grp_credit = pd.DataFrame()
@@ -280,7 +436,7 @@ else:
                     use_container_width=True,
                     hide_index=True
                 )
-                
+
                 # PPP Chart
                 ppp_chart = alt.Chart(grp_credit).mark_bar().encode(
                     x=alt.X("Credit Play", sort="-y", title=None),
@@ -291,12 +447,12 @@ else:
                     height=300
                 )
                 st.altair_chart(ppp_chart, use_container_width=True)
-    
+
             # ALL TAGGED PLAYS basis
             vis_exploded = vis.assign(Plays=vis['Plays'].str.split('| ')).explode('Plays').copy()
             vis_exploded["Plays"] = vis_exploded["Plays"].str.strip()
             vis_exploded = vis_exploded[vis_exploded["Plays"] != ""]
-            
+
             grp_all = pd.DataFrame()
             if not vis_exploded.empty:
                 grp_all = vis_exploded.groupby("Plays", dropna=False).agg(
@@ -307,14 +463,14 @@ else:
                 grp_all["Frequency%"] = grp_all["Frequency"] / total_plays
                 grp_all["Success%"] = grp_all["Successes"] / grp_all["Frequency"]
                 grp_all = grp_all.sort_values("Frequency", ascending=False).round(2)
-                
+
                 st.markdown("##### Frequency: All Tagged Plays")
                 st.dataframe(
                     grp_all[["Plays","Frequency","Frequency%","Success%"]],
                     use_container_width=True,
                     hide_index=True
                 )
-    
+
     with DR:
         if not df.empty:
             # Frequency Chart
@@ -327,7 +483,7 @@ else:
                 height=300
             )
             st.altair_chart(freq_chart, use_container_width=True)
-            
+
             # Success Rate Chart
             success_chart = alt.Chart(grp_all).mark_bar().encode(
                 x=alt.X("Plays", sort="-y", title=None),
@@ -338,21 +494,31 @@ else:
                 height=300
             )
             st.altair_chart(success_chart, use_container_width=True)
-    
+
     # ----- EDIT/DELETE Plays Section -----
     st.markdown("### 📝 Edit & Delete Plays")
     if df.empty:
         st.info("No plays to edit or delete.")
     else:
+        # Add a unique index to each row for tracking changes
+        df_editor = df.reset_index().rename(columns={"index": "id"})
+        df_editor["id"] = df_editor.index
+
         # Use st.data_editor for editable table
         st.markdown("#### Edit Possessions")
         edited_df = st.data_editor(
-            df,
+            df_editor,
             column_order=GAME_HEADERS,
             column_config={
-                "Timestamp": st.column_config.TextColumn("Timestamp (HH:MM:SS)", help="Game clock timestamp"),
-                "Plays": st.column_config.TextColumn("Plays", help="Multiple plays separated by | "),
-                "Credit Play": st.column_config.SelectboxColumn("Credit Play", options=ss["plays_master"]),
+                "Timestamp": st.column_config.TextColumn(
+                    "Timestamp (HH:MM:SS)", help="Game clock timestamp"
+                ),
+                "Plays": st.column_config.TextColumn(
+                    "Plays", help="Multiple plays separated by | "
+                ),
+                "Credit Play": st.column_config.SelectboxColumn(
+                    "Credit Play", options=ss["plays_master"]
+                ),
                 "Call Type": st.column_config.TextColumn("Call Type"),
                 "Caller": st.column_config.SelectboxColumn("Caller", options=CALLERS),
                 "Outcome": st.column_config.SelectboxColumn("Outcome", options=SC_OUTCOMES),
@@ -365,32 +531,55 @@ else:
                 "Success": st.column_config.SelectboxColumn("Success", options=["Yes", "No"]),
             },
             use_container_width=True,
-            hide_index=False, # Use index for reference
+            hide_index=True,
             num_rows="dynamic",
             key="data_editor_table"
         )
-    
+
         # Convert edited data back to dictionary list
         edited_rows = edited_df.to_dict("records")
-        
+
         # Check for changes and offer to sync
         if edited_rows != ss["game_data"].get(ss["current_game"], []):
-            if st.button("Save Changes Locally", key="sync_button"):
+            if st.button("Sync Changes", key="sync_button"):
+                # Update local session state with the new data
                 ss["game_data"][ss["current_game"]] = edited_rows
-                st.success("Changes saved locally!")
-                st.rerun()
-    
+
+                # Overwrite the sheet with the new DataFrame
+                if sheets_connected:
+                    try:
+                        sheets_overwrite_game(ss["current_game"], pd.DataFrame(edited_rows))
+                        read_game_from_sheets.clear()
+                        st.success("Changes synced to Google Sheets!")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Failed to sync changes: {e}")
+                else:
+                    st.info("Changes saved locally, but not synced to Google Sheets (local mode).")
+                    st.rerun()
+
         # Deletion logic
         st.markdown("#### Delete Possessions")
         rows_to_delete = st.multiselect("Select rows to delete", options=df.index.tolist(), format_func=lambda x: f"Row {x+1}: {df.iloc[x]['Timestamp']} | {df.iloc[x]['Plays']}", key="delete_selector")
-        
+
         if rows_to_delete:
             if st.button("Delete Selected Possessions", key="delete_button"):
                 # Get the indices to keep
                 indices_to_keep = [i for i in range(len(df)) if i not in rows_to_delete]
                 updated_data = [df.iloc[i].to_dict() for i in indices_to_keep]
-                
+
                 # Update local state
                 ss["game_data"][ss["current_game"]] = updated_data
-                st.success(f"Successfully deleted {len(rows_to_delete)} rows locally!")
-                st.rerun()
+
+                # Overwrite the sheet
+                if sheets_connected:
+                    try:
+                        sheets_overwrite_game(ss["current_game"], pd.DataFrame(updated_data))
+                        read_game_from_sheets.clear()
+                        st.success(f"Successfully deleted {len(rows_to_delete)} rows and synced to Google Sheets!")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Failed to delete rows: {e}")
+                else:
+                    st.info("Deletions saved locally, but not synced to Google Sheets (local mode).")
+                    st.rerun()
