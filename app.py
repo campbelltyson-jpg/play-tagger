@@ -3,13 +3,8 @@ import pandas as pd
 import numpy as np
 import altair as alt
 import streamlit.components.v1 as components
-import gspread
 
 # --- CONSTANTS & CONFIGURATION ---
-# The URL for the publicly shared Google Sheets spreadsheet
-SHEETS_URL = st.secrets["SHEETS_URL"]
-
-# Master lists for UI dropdowns/multiselects
 CALLERS = ["John", "Paul", "George", "Ringo", "Other"]
 QUARTERS = ["Q1", "Q2", "Q3", "Q4", "OT", "2OT", "3OT", "4OT"]
 SC_OUTCOMES = [
@@ -44,71 +39,6 @@ def get_ss(key, default):
         st.session_state[key] = default
     return st.session_state[key]
 
-# --- GOOGLE SHEETS INTERACTION ---
-@st.cache_resource(ttl=3600)
-def get_gspread_client():
-    """Initializes and returns a gspread client."""
-    try:
-        # Load credentials from st.secrets
-        gs_client = gspread.service_account_from_dict(st.secrets["gcp_service_account"])
-        return gs_client
-    except Exception as e:
-        st.error(f"Failed to connect to Google Sheets: {e}")
-        return None
-
-gs_client = get_gspread_client()
-sheets_connected = gs_client is not None
-
-def sheets_append_play(game_name, row_data):
-    """Appends a new row to a specific worksheet."""
-    try:
-        sh = gs_client.open_by_url(SHEETS_URL)
-        worksheet = sh.worksheet(game_name)
-        worksheet.append_row(row_data)
-        return True
-    except gspread.exceptions.WorksheetNotFound:
-        st.error(f"Worksheet '{game_name}' not found. Please create it manually.")
-        return False
-    except Exception as e:
-        st.error(f"Error appending row to Google Sheets: {e}")
-        return False
-
-def sheets_overwrite_game(game_name, df: pd.DataFrame):
-    """Overwrites an entire game's worksheet with a new DataFrame."""
-    try:
-        sh = gs_client.open_by_url(SHEETS_URL)
-        worksheet = sh.worksheet(game_name)
-        worksheet.clear()
-        worksheet.append_row(list(df.columns))
-        worksheet.append_rows(df.astype(str).values.tolist())
-        return True
-    except gspread.exceptions.WorksheetNotFound:
-        st.error(f"Worksheet '{game_name}' not found. Please create it manually.")
-        return False
-    except Exception as e:
-        st.error(f"Error overwriting sheet: {e}")
-        return False
-
-@st.cache_data(ttl=300)
-def read_game_from_sheets(game_name):
-    """Reads a specific worksheet into a DataFrame."""
-    if not sheets_connected:
-        return pd.DataFrame()
-    try:
-        sh = gs_client.open_by_url(SHEETS_URL)
-        worksheet = sh.worksheet(game_name)
-        data = worksheet.get_all_records()
-        df = pd.DataFrame(data)
-        # Type casting for specific columns
-        if not df.empty:
-            df['Points'] = pd.to_numeric(df['Points'], errors='coerce').fillna(0).astype(int)
-        return df
-    except gspread.exceptions.WorksheetNotFound:
-        return pd.DataFrame()
-    except Exception as e:
-        st.error(f"Error reading from Google Sheets: {e}")
-        return pd.DataFrame()
-
 # --- SESSION STATE MANAGEMENT ---
 ss = st.session_state
 
@@ -139,53 +69,27 @@ st.markdown("""
 # --- SIDEBAR ---
 with st.sidebar:
     st.title("Settings")
-
-    if sheets_connected:
-        try:
-            sh = gs_client.open_by_url(SHEETS_URL)
-            worksheets = [ws.title for ws in sh.worksheets()]
-            existing_games = [ws for ws in worksheets if ws != "master_config"]
-        except Exception:
-            existing_games = []
-    else:
-        existing_games = []
-
+    
     st.subheader("Load/Create Game")
     
-    # Load game from existing sheets
-    selected_game = st.selectbox("Select Existing Game:", existing_games, index=None)
-    
-    # New game creation input
-    new_game_name = st.text_input("Or Start New Game Name:")
+    new_game_name = st.text_input("Start New Game Name:")
     new_game_opp = st.text_input("New Game Opponent:", "")
     new_game_type = st.selectbox("New Game Type:", ["Game", "Scrimmage", "Scout"])
 
-    if st.button("Load/Create Game"):
-        if selected_game:
-            ss["current_game"] = selected_game
-            ss["game_meta"][selected_game] = {"opponent": "N/A", "type": "Game"} # Dummy metadata for existing games
-            st.success(f"Game '{selected_game}' loaded.")
-        elif new_game_name:
-            if sheets_connected:
-                # Check if worksheet already exists
-                if new_game_name not in existing_games:
-                    try:
-                        sh = gs_client.open_by_url(SHEETS_URL)
-                        worksheet = sh.add_worksheet(title=new_game_name, rows="1", cols="1")
-                        worksheet.append_row(GAME_HEADERS)
-                        st.success(f"New worksheet '{new_game_name}' created!")
-                    except Exception as e:
-                        st.error(f"Failed to create new sheet: {e}")
-                        ss["current_game"] = None
-                        st.stop()
-                else:
-                    st.warning(f"Worksheet '{new_game_name}' already exists. Loading it instead.")
+    if st.button("Start New Game"):
+        if new_game_name:
             ss["current_game"] = new_game_name
-            ss["game_meta"][new_game_name] = {"opponent": new_game_opp, "type": new_game_type}
-            st.success(f"Game '{new_game_name}' loaded.")
+            ss["game_data"][new_game_name] = []
+            ss["game_meta"][new_game_name] = {"opponent": new_game_opp, "type": new_game_type, "quarter": "Q1"}
+            ss["plays_master"] = set()
+            st.success(f"Game '{new_game_name}' started.")
         else:
-            st.warning("Please select an existing game or enter a new game name.")
+            st.warning("Please enter a new game name.")
             st.stop()
+            
+    if st.button("Clear Session Data"):
+        st.session_state.clear()
+        st.success("All session data has been cleared. Refresh the page to start a new session.")
     
     if ss["current_game"]:
         st.subheader("Game Clock")
@@ -207,7 +111,6 @@ with st.sidebar:
             ss["game_clock_min"], ss["game_clock_sec"] = 24, "00"
             
         st.subheader("Tagging")
-        ss["plays_master"] = set(read_game_from_sheets.clear() or read_game_from_sheets(ss["current_game"])["Plays"].str.split(" | ").explode().str.strip().dropna().unique())
         
         ss["ms_plays"] = st.multiselect(
             "Tag Plays:",
@@ -235,15 +138,9 @@ with st.sidebar:
 
 # --- MAIN APP ---
 if not ss["current_game"]:
-    st.info("Please select or create a game in the sidebar to begin.")
+    st.info("Please start a new game in the sidebar to begin.")
 else:
     st.title(f"🏀 Live Game: {ss['current_game']}")
-    
-    # Reload data from sheets on app start for rehydration
-    if ss["current_game"] not in ss["game_data"]:
-        with st.spinner(f"Loading game data for '{ss['current_game']}'..."):
-            df_rehydrated = read_game_from_sheets(ss["current_game"])
-            ss["game_data"][ss["current_game"]] = df_rehydrated.to_dict("records")
             
     st.header("Possession Logger")
     
@@ -284,20 +181,6 @@ else:
     
     def push_row(r: dict):
         ss["game_data"].setdefault(ss["current_game"], []).append(r)
-        if sheets_connected:
-            try:
-                sheets_append_play(ss["current_game"], [
-                    r["Timestamp"], r["Plays"], r["Credit Play"], r["Call Type"], r["Caller"],
-                    r["Outcome"], r["Points"], r["2nd Chance?"], r["2nd Chance Outcome"],
-                    r["Quarter"], r["Opponent"], r["Game Type"], r["Success"]
-                ])
-                # rehydrate to confirm sync
-                read_game_from_sheets.clear()
-                df_h = read_game_from_sheets(ss["current_game"])
-                if not df_h.empty:
-                    ss["game_data"][ss["current_game"]] = df_h.to_dict("records")
-            except Exception as e:
-                st.error(f"Sheets append failed: {e}")
     
     def auto_decrement_clock():
         m = ss["game_clock_min"]; s = int(ss["game_clock_sec"])
@@ -326,13 +209,7 @@ else:
             if rows:
                 rows.pop()
                 ss["game_data"][ss["current_game"]] = rows
-                if sheets_connected:
-                    try:
-                        sheets_overwrite_game(ss["current_game"], pd.DataFrame(rows))
-                        read_game_from_sheets.clear()
-                        st.success("Undid last possession (synced).")
-                    except Exception as e:
-                        st.error(f"Undo sync failed: {e}")
+                st.success("Undid last possession.")
             else:
                 st.warning("No possessions to undo.")
     st.markdown('</div>', unsafe_allow_html=True)
@@ -351,7 +228,7 @@ else:
         ss["pending_action"] = None
         ss["ms_plays"] = set() # clear selection for next possession
         auto_decrement_clock()
-        st.success("Possession logged and synced!")
+        st.success("Possession logged!")
     
     # Pending banner + Confirm (now using a form)
     if ss.get("pending_action"):
@@ -467,25 +344,15 @@ else:
     if df.empty:
         st.info("No plays to edit or delete.")
     else:
-        # Add a unique index to each row for tracking changes
-        df_editor = df.reset_index().rename(columns={"index": "id"})
-        df_editor["id"] = df_editor.index
-        
         # Use st.data_editor for editable table
         st.markdown("#### Edit Possessions")
         edited_df = st.data_editor(
-            df_editor,
+            df,
             column_order=GAME_HEADERS,
             column_config={
-                "Timestamp": st.column_config.TextColumn(
-                    "Timestamp (HH:MM:SS)", help="Game clock timestamp"
-                ),
-                "Plays": st.column_config.TextColumn(
-                    "Plays", help="Multiple plays separated by | "
-                ),
-                "Credit Play": st.column_config.SelectboxColumn(
-                    "Credit Play", options=ss["plays_master"]
-                ),
+                "Timestamp": st.column_config.TextColumn("Timestamp (HH:MM:SS)", help="Game clock timestamp"),
+                "Plays": st.column_config.TextColumn("Plays", help="Multiple plays separated by | "),
+                "Credit Play": st.column_config.SelectboxColumn("Credit Play", options=ss["plays_master"]),
                 "Call Type": st.column_config.TextColumn("Call Type"),
                 "Caller": st.column_config.SelectboxColumn("Caller", options=CALLERS),
                 "Outcome": st.column_config.SelectboxColumn("Outcome", options=SC_OUTCOMES),
@@ -498,7 +365,7 @@ else:
                 "Success": st.column_config.SelectboxColumn("Success", options=["Yes", "No"]),
             },
             use_container_width=True,
-            hide_index=True,
+            hide_index=False, # Use index for reference
             num_rows="dynamic",
             key="data_editor_table"
         )
@@ -508,22 +375,10 @@ else:
         
         # Check for changes and offer to sync
         if edited_rows != ss["game_data"].get(ss["current_game"], []):
-            if st.button("Sync Changes", key="sync_button"):
-                # Update local session state with the new data
+            if st.button("Save Changes Locally", key="sync_button"):
                 ss["game_data"][ss["current_game"]] = edited_rows
-                
-                # Overwrite the sheet with the new DataFrame
-                if sheets_connected:
-                    try:
-                        sheets_overwrite_game(ss["current_game"], pd.DataFrame(edited_rows))
-                        read_game_from_sheets.clear()
-                        st.success("Changes synced to Google Sheets!")
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Failed to sync changes: {e}")
-                else:
-                    st.info("Changes saved locally, but not synced to Google Sheets (local mode).")
-                    st.rerun()
+                st.success("Changes saved locally!")
+                st.rerun()
     
         # Deletion logic
         st.markdown("#### Delete Possessions")
@@ -537,16 +392,5 @@ else:
                 
                 # Update local state
                 ss["game_data"][ss["current_game"]] = updated_data
-                
-                # Overwrite the sheet
-                if sheets_connected:
-                    try:
-                        sheets_overwrite_game(ss["current_game"], pd.DataFrame(updated_data))
-                        read_game_from_sheets.clear()
-                        st.success(f"Successfully deleted {len(rows_to_delete)} rows and synced to Google Sheets!")
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Failed to delete rows: {e}")
-                else:
-                    st.info("Deletions saved locally, but not synced to Google Sheets (local mode).")
-                    st.rerun()
+                st.success(f"Successfully deleted {len(rows_to_delete)} rows locally!")
+                st.rerun()
